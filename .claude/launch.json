@@ -1,0 +1,25 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Frontend (Vite)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000,
+      "cwd": "frontend"
+    },
+    {
+      "name": "Backend (FastAPI)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--reload", "--port", "8000"],
+      "port": 8000,
+      "cwd": "backend"
+    },
+    {
+      "name": "Server (Tornado)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["server.py"],
+      "port": 3000
+    }
+  ]
+}

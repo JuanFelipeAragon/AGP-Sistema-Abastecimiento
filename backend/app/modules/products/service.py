@@ -8,9 +8,9 @@ Tables used:
   - warehouses         (normalized bodegas)
   - classifications    (dimension value normalization)
 """
+import asyncio
 import logging
 import uuid
-from collections import Counter
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -27,17 +27,32 @@ from app.modules.products.schemas import (
     ClassificationStatus,
     BulkActionRequest,
     AcabadoItem,
+    AcabadoStats,
     AcabadoListResponse,
+    AcabadoCreateRequest,
+    AcabadoUpdateRequest,
+    AcabadoBulkActionRequest,
+    AcabadoStatus,
+    AcabadoEnrichmentStatus,
     DashboardSummaryResponse,
     ChangeLogEntry,
     ProductBaseListParams,
     ProductBaseItem,
     ProductBaseListResponse,
+    ProductBaseTypeCounts,
     ProductBaseDetailResponse,
     WarehouseRecordListParams,
     WarehouseRecordItem,
     WarehouseRecordListResponse,
     ProductsSummaryResponse,
+    TypeAttributeConfig,
+    ProductTypeConfigResponse,
+    AttributeItem,
+    AttributeStats,
+    AttributeListResponse,
+    AttributeCreateRequest,
+    AttributeUpdateRequest,
+    AttributeBulkActionRequest,
 )
 
 logger = logging.getLogger("agp.products")
@@ -64,49 +79,246 @@ DIM_MAP = {
 class ProductsService:
     """Service layer for Products module — all data from Supabase."""
 
+    # ── Classification Lookup Helper ──
+
+    async def _get_classification_maps(self) -> dict[str, dict[str, str]]:
+        """Build {dimension: {original_value: normalized_value}} maps for display.
+
+        Returns maps for categoria, subcategoria, and sistema dimensions.
+        Includes ALL statuses — display mapping should work regardless of
+        whether the classification is active or inactive.
+        """
+        sb = _sb()
+        result = sb.table("classifications").select(
+            "dimension, original_value, normalized_value"
+        ).in_(
+            "dimension", ["categoria", "subcategoria", "sistema"]
+        ).execute()
+
+        maps: dict[str, dict[str, str]] = {
+            "categoria": {},
+            "subcategoria": {},
+            "sistema": {},
+        }
+        for row in (result.data or []):
+            dim = row["dimension"]
+            if dim in maps:
+                maps[dim][row["original_value"]] = row["normalized_value"]
+        return maps
+
+    def _normalize(
+        self, raw_value: Optional[str], lookup: dict[str, str]
+    ) -> Optional[str]:
+        """Return normalized name for a raw value, fallback to raw if no mapping."""
+        if not raw_value:
+            return None
+        return lookup.get(raw_value, raw_value)
+
+    async def _reverse_lookup(self, dimension: str, normalized: str) -> Optional[str]:
+        """Find the original_value for a given normalized_value."""
+        sb = _sb()
+        result = sb.table("classifications").select("original_value").eq(
+            "dimension", dimension
+        ).eq("normalized_value", normalized).limit(1).execute()
+        if result.data:
+            return result.data[0]["original_value"]
+        return normalized  # fallback: maybe it's already the raw value
+
+    # ── Product Type Config ──
+
+    async def get_type_config(self) -> ProductTypeConfigResponse:
+        """Get attribute configuration for all product types."""
+        sb = _sb()
+        result = sb.table("product_type_config").select("*").order("sort_order").execute()
+
+        config: dict[str, list[TypeAttributeConfig]] = {}
+        for row in (result.data or []):
+            pt = row["product_type"]
+            if pt not in config:
+                config[pt] = []
+            config[pt].append(TypeAttributeConfig(
+                key=row["attribute_key"],
+                label=row["label"],
+                visible=row.get("visible", True),
+                required=row.get("required", False),
+                sortOrder=row.get("sort_order", 0),
+            ))
+
+        return ProductTypeConfigResponse(config=config)
+
+    async def get_subcategoria_type_map(self) -> dict[str, str]:
+        """Get mapping of subcategoria_raw → product_type from products table.
+
+        Uses individual count queries per known type to avoid Supabase row limits.
+        """
+        sb = _sb()
+        # Query each product_type to get its subcategorias
+        mapping: dict[str, str] = {}
+        for pt in ["Perfil", "Lamina", "Escalera", "Accesorio", "Otro"]:
+            result = sb.table("products").select(
+                "subcategoria_raw"
+            ).eq("product_type", pt).not_.is_(
+                "subcategoria_raw", "null"
+            ).limit(200).execute()
+            for row in (result.data or []):
+                sr = row.get("subcategoria_raw")
+                if sr and sr not in mapping:
+                    mapping[sr] = pt
+        return mapping
+
+    # ── SKU Filter Options (Cascading) ──
+
+    async def get_sku_filter_options(
+        self,
+        subcategory: Optional[str] = None,
+        acabado: Optional[str] = None,
+        temple: Optional[str] = None,
+        aleacion_code: Optional[str] = None,
+        longitud: Optional[float] = None,
+    ) -> dict:
+        """Get available filter values for SKUs based on current filter state.
+
+        Returns only values that exist in the filtered dataset — enables cascading filters.
+        """
+        sb = _sb()
+
+        # Build a base query with current filters applied
+        query = sb.table("product_variants").select(
+            "temple, aleacion_code, longitud_m, "
+            "acabado:acabados!left(nombre), "
+            "product:products!inner(subcategoria_raw)"
+        )
+
+        # Apply filters progressively
+        if subcategory:
+            raw = await self._reverse_lookup("subcategoria", subcategory)
+            query = query.eq("product.subcategoria_raw", raw)
+        if temple:
+            query = query.eq("temple", temple)
+        if aleacion_code:
+            query = query.eq("aleacion_code", aleacion_code)
+        if longitud is not None:
+            query = query.eq("longitud_m", longitud)
+
+        # Note: acabado filter via PostgREST join is unreliable for filtering,
+        # so we filter acabado in Python after fetching
+        query = query.limit(2000)  # Get enough rows for distinct values
+        result = query.execute()
+        rows = result.data or []
+
+        # If acabado filter is set, filter in Python
+        if acabado:
+            rows = [r for r in rows if (r.get("acabado") or {}).get("nombre") == acabado]
+
+        # Count frequencies for each attribute — sorted by most frequent first
+        from collections import Counter
+        acabados_ctr: Counter = Counter()
+        temples_ctr: Counter = Counter()
+        aleaciones_ctr: Counter = Counter()
+        longitudes_ctr: Counter = Counter()
+
+        for row in rows:
+            acab = (row.get("acabado") or {}).get("nombre")
+            if acab:
+                acabados_ctr[acab] += 1
+            t = row.get("temple")
+            if t:
+                temples_ctr[t] += 1
+            ac = row.get("aleacion_code")
+            if ac:
+                aleaciones_ctr[ac] += 1
+            lng = row.get("longitud_m")
+            if lng is not None:
+                longitudes_ctr[str(float(lng))] += 1
+
+        def to_ranked(counter: Counter) -> list[dict]:
+            """Convert Counter to [{value, count}] sorted by frequency desc."""
+            return [{"value": val, "count": cnt} for val, cnt in counter.most_common()]
+
+        return {
+            "acabados": to_ranked(acabados_ctr),
+            "temples": to_ranked(temples_ctr),
+            "aleaciones": to_ranked(aleaciones_ctr),
+            "longitudes": to_ranked(longitudes_ctr),
+        }
+
     # ── SKU Methods ──
 
     async def get_skus(self, params: SKUListParams) -> SKUListResponse:
         """Get filtered, sorted, paginated product variants with their base product data."""
         sb = _sb()
 
-        # Build query joining variants with products
+        # Build query joining variants with products + acabados
         query = sb.table("product_variants").select(
-            "id, reference_siesa, item_id, acabado_name, acabado_code, aleacion, "
+            "id, reference_siesa, item_id, acabado_id, aleacion, temple, aleacion_code, "
             "longitud_m, status, flag_compra, flag_venta, "
-            "fecha_creacion_siesa, "
+            "fecha_creacion_siesa, subcategoria_raw, categoria_raw, sistema_raw, linea_raw, "
+            "acabado:acabados(id, codigo, nombre_siesa, nombre), "
             "product:products!inner(id, reference, description, categoria_raw, "
-            "subcategoria_raw, sistema_raw, linea_raw, peso_um, is_profile)"
+            "subcategoria_raw, sistema_raw, linea_raw, peso_um, is_profile, product_type)",
+            count="exact",
         )
 
-        # Apply filters via product fields
+        # Helper: split comma-separated multi-select values
+        def split_multi(val: Optional[str]) -> list[str]:
+            if not val:
+                return []
+            return [v.strip() for v in val.split(",") if v.strip()]
+
+        # Apply filters — support both single and comma-separated multi-select
         if params.category:
-            query = query.eq("product.categoria_raw", params.category)
+            vals = split_multi(params.category)
+            raws = [await self._reverse_lookup("categoria", v) for v in vals]
+            query = query.in_("product.categoria_raw", raws) if len(raws) > 1 else query.eq("product.categoria_raw", raws[0])
         if params.subcategory:
-            query = query.eq("product.subcategoria_raw", params.subcategory)
+            vals = split_multi(params.subcategory)
+            raws = [await self._reverse_lookup("subcategoria", v) for v in vals]
+            # Use variant-level subcategoria_raw (more accurate than product-level)
+            query = query.in_("subcategoria_raw", raws) if len(raws) > 1 else query.eq("subcategoria_raw", raws[0])
         if params.sistema:
-            query = query.eq("product.sistema_raw", params.sistema)
+            vals = split_multi(params.sistema)
+            raws = [await self._reverse_lookup("sistema", v) for v in vals]
+            query = query.in_("product.sistema_raw", raws) if len(raws) > 1 else query.eq("product.sistema_raw", raws[0])
         if params.linea:
             query = query.eq("product.linea_raw", params.linea)
         if params.acabado:
-            query = query.eq("acabado_name", params.acabado)
+            vals = split_multi(params.acabado)
+            acab_result = sb.table("acabados").select("id").in_("nombre", vals).execute()
+            acab_ids = [str(r["id"]) for r in (acab_result.data or [])]
+            if acab_ids:
+                query = query.in_("acabado_id", acab_ids)
+            else:
+                return SKUListResponse(items=[], total=0, page=params.page, page_size=params.page_size)
+        if params.temple:
+            vals = split_multi(params.temple)
+            query = query.in_("temple", vals) if len(vals) > 1 else query.eq("temple", vals[0])
+        if params.aleacion_code:
+            vals = split_multi(params.aleacion_code)
+            query = query.in_("aleacion_code", vals) if len(vals) > 1 else query.eq("aleacion_code", vals[0])
+        if params.longitud is not None:
+            query = query.eq("longitud_m", params.longitud)
+        if params.longitud_min is not None:
+            query = query.gte("longitud_m", params.longitud_min)
+        if params.longitud_max is not None:
+            query = query.lte("longitud_m", params.longitud_max)
+        if params.status:
+            db_status = "active" if params.status == "Activo" else "inactive"
+            query = query.eq("status", db_status)
 
         if params.search:
             s = params.search
-            # PostgREST can't filter on joined fields inside or_(),
-            # so search only on variant's own reference_siesa
             query = query.ilike("reference_siesa", f"%{s}%")
 
         # Sort
         sort_field = params.sort_field or "reference_siesa"
         sort_desc = params.sort_order.value == "desc"
 
-        # Map frontend sort fields to DB columns
         sort_map = {
             "ref": "reference_siesa",
             "desc": "product.description",
-            "acabado": "acabado_name",
-            "cost": "reference_siesa",  # cost is in warehouse table, sort by ref for now
+            "acabado": "reference_siesa",
+            "temple": "temple",
+            "aleacionCode": "aleacion_code",
         }
         db_sort = sort_map.get(sort_field, sort_field)
         query = query.order(db_sort, desc=sort_desc)
@@ -117,36 +329,36 @@ class ProductsService:
 
         result = query.execute()
         rows = result.data or []
+        total = result.count if result.count is not None else len(rows)
 
-        # For total count: use the count from the main query if available,
-        # otherwise estimate from returned rows
-        # Note: Supabase returns count header when using count="exact" but
-        # the join query doesn't support it cleanly, so we do a separate count
-        total = len(rows)
-        if len(rows) == params.page_size:
-            # Might have more pages - do a count query
-            count_q = sb.table("product_variants").select("id", count="exact")
-            if params.acabado:
-                count_q = count_q.eq("acabado_name", params.acabado)
-            if params.search:
-                count_q = count_q.ilike("reference_siesa", f"%{params.search}%")
-            count_result = count_q.execute()
-            total = count_result.count if count_result.count is not None else len(rows)
+        # Load classification maps for normalized display
+        cls_maps = await self._get_classification_maps()
 
-        # Transform to SKUResponse format
+        # Transform to SKUResponse format with normalized names
         items = []
         for row in rows:
             product = row.get("product", {}) or {}
+            acabado_data = row.get("acabado", {}) or {}
+            # Use acabado app name (nombre) if available, fallback to nombre_siesa
+            acabado_display = acabado_data.get("nombre") or acabado_data.get("nombre_siesa")
+            acabado_code = acabado_data.get("codigo")
+
             items.append(SKUResponse(
-                ref=row.get("reference_siesa", ""),
+                variantId=row.get("id", 0),
+                ref=product.get("reference", row.get("reference_siesa", "")),
+                refSiesa=row.get("reference_siesa", ""),
                 desc=product.get("description", ""),
-                cat=product.get("categoria_raw"),
-                sub=product.get("subcategoria_raw"),
-                sys=product.get("sistema_raw"),
+                cat=self._normalize(row.get("categoria_raw") or product.get("categoria_raw"), cls_maps["categoria"]),
+                sub=self._normalize(row.get("subcategoria_raw") or product.get("subcategoria_raw"), cls_maps["subcategoria"]),
+                sys=self._normalize(row.get("sistema_raw") or product.get("sistema_raw"), cls_maps["sistema"]),
                 lin=product.get("linea_raw"),
-                acabado=row.get("acabado_name"),
-                codAcabado=row.get("acabado_code"),
+                productType=product.get("product_type") or "Otro",
+                acabado=acabado_display,
+                codAcabado=acabado_code,
+                temple=row.get("temple"),
                 aleacion=row.get("aleacion"),
+                aleacionCode=row.get("aleacion_code"),
+                longitud=float(row["longitud_m"]) if row.get("longitud_m") else None,
                 wt=float(product.get("peso_um") or 0),
                 fCreacion=row.get("fecha_creacion_siesa"),
                 status="Activo" if row.get("status") == "active" else "Inactivo",
@@ -216,7 +428,7 @@ class ProductsService:
                 f"original_value.ilike.%{search}%,normalized_value.ilike.%{search}%"
             )
 
-        query = query.order("normalized_value")
+        query = query.order("priority").order("normalized_value")
         result = query.execute()
         rows = result.data or []
 
@@ -226,12 +438,16 @@ class ProductsService:
                 id=str(row["id"]),
                 originalValue=row["original_value"],
                 normalizedValue=row["normalized_value"],
+                description=row.get("description"),
+                notes=row.get("notes"),
                 status=ClassificationStatus(row.get("status", "active")),
                 skuCount=row.get("sku_count", 0),
+                priority=row.get("priority", 0),
                 isEdited=row.get("original_value") != row.get("normalized_value"),
                 createdAt=row.get("created_at"),
                 updatedAt=row.get("updated_at"),
                 createdBy=row.get("created_by"),
+                updatedBy=row.get("updated_by"),
             ))
 
         active = sum(1 for it in items if it.status == ClassificationStatus.active)
@@ -248,7 +464,8 @@ class ProductsService:
         )
 
     async def create_classification(
-        self, dimension: str, data: ClassificationCreateRequest
+        self, dimension: str, data: ClassificationCreateRequest,
+        user_name: str = "system"
     ) -> ClassificationItem:
         """Create a new classification value in Supabase."""
         sb = _sb()
@@ -258,8 +475,12 @@ class ProductsService:
             "dimension": db_dim,
             "original_value": data.originalValue,
             "normalized_value": data.normalizedValue,
+            "description": data.description,
+            "notes": data.notes,
+            "priority": data.priority,
             "status": "active",
-            "created_by": "user",
+            "created_by": user_name,
+            "updated_by": user_name,
         }
         result = sb.table("classifications").insert(record).execute()
         row = result.data[0]
@@ -274,24 +495,33 @@ class ProductsService:
         )
 
     async def update_classification(
-        self, dimension: str, original_value: str, data: ClassificationUpdateRequest
+        self, dimension: str, classification_id: str, data: ClassificationUpdateRequest,
+        user_name: str = "system"
     ) -> Optional[ClassificationItem]:
-        """Update an existing classification value in Supabase."""
+        """Update an existing classification value in Supabase by UUID."""
         sb = _sb()
         db_dim = DIM_MAP.get(dimension, dimension)
 
         updates = {}
         if data.normalizedValue is not None:
             updates["normalized_value"] = data.normalizedValue
+        if data.description is not None:
+            updates["description"] = data.description
+        if data.notes is not None:
+            updates["notes"] = data.notes
         if data.status is not None:
             updates["status"] = data.status.value
+        if data.priority is not None:
+            updates["priority"] = data.priority
 
         if not updates:
             return None
 
+        updates["updated_by"] = user_name
+
         result = sb.table("classifications").update(updates).eq(
             "dimension", db_dim
-        ).eq("original_value", original_value).execute()
+        ).eq("id", classification_id).execute()
 
         if not result.data:
             return None
@@ -301,14 +531,21 @@ class ProductsService:
             id=str(row["id"]),
             originalValue=row["original_value"],
             normalizedValue=row["normalized_value"],
+            description=row.get("description"),
+            notes=row.get("notes"),
             status=ClassificationStatus(row.get("status", "active")),
             skuCount=row.get("sku_count", 0),
+            priority=row.get("priority", 0),
             isEdited=row.get("original_value") != row.get("normalized_value"),
+            createdAt=row.get("created_at"),
             updatedAt=row.get("updated_at"),
+            createdBy=row.get("created_by"),
+            updatedBy=row.get("updated_by"),
         )
 
     async def bulk_classification_action(
-        self, dimension: str, action_data: BulkActionRequest
+        self, dimension: str, action_data: BulkActionRequest,
+        user_name: str = "system"
     ) -> dict:
         """Handle bulk actions on classifications in Supabase."""
         sb = _sb()
@@ -316,35 +553,41 @@ class ProductsService:
         affected = 0
 
         if action_data.action.value == "rename" and action_data.newValue:
-            for ov in action_data.ids:
+            for rid in action_data.ids:
                 sb.table("classifications").update(
-                    {"normalized_value": action_data.newValue}
-                ).eq("dimension", db_dim).eq("original_value", ov).execute()
-                affected += 1
-
-        elif action_data.action.value == "merge" and action_data.newValue:
-            for ov in action_data.ids:
-                sb.table("classifications").update(
-                    {"normalized_value": action_data.newValue}
-                ).eq("dimension", db_dim).eq("original_value", ov).execute()
+                    {"normalized_value": action_data.newValue, "updated_by": user_name}
+                ).eq("dimension", db_dim).eq("id", rid).execute()
                 affected += 1
 
         elif action_data.action.value == "inactivate":
-            for ov in action_data.ids:
+            for rid in action_data.ids:
                 sb.table("classifications").update(
-                    {"status": "inactive"}
-                ).eq("dimension", db_dim).eq("original_value", ov).execute()
+                    {"status": "inactive", "updated_by": user_name}
+                ).eq("dimension", db_dim).eq("id", rid).execute()
                 affected += 1
 
-        elif action_data.action.value == "delete":
-            for ov in action_data.ids:
-                sb.table("classifications").delete().eq(
-                    "dimension", db_dim
-                ).eq("original_value", ov).execute()
+        elif action_data.action.value == "activate":
+            for rid in action_data.ids:
+                sb.table("classifications").update(
+                    {"status": "active", "updated_by": user_name}
+                ).eq("dimension", db_dim).eq("id", rid).execute()
                 affected += 1
 
         elif action_data.action.value == "export":
-            affected = len(action_data.ids)
+            # Return the data for CSV export
+            items = []
+            for rid in action_data.ids:
+                result = sb.table("classifications").select("*").eq(
+                    "dimension", db_dim
+                ).eq("id", rid).execute()
+                if result.data:
+                    items.append(result.data[0])
+            return {
+                "action": "export",
+                "affected": len(items),
+                "items": items,
+                "message": f"Exportando {len(items)} elementos",
+            }
 
         return {
             "action": action_data.action.value,
@@ -352,139 +595,324 @@ class ProductsService:
             "message": f"Accion '{action_data.action.value}' aplicada a {affected} elementos",
         }
 
-    # ── Acabado Methods ──
+    # ── Acabado Methods (dedicated acabados table) ──
 
-    async def get_acabados(self, search: Optional[str] = None) -> AcabadoListResponse:
-        """Get all acabados from classifications table."""
+    def _row_to_acabado(self, row: dict, subcats: list[str] = None) -> AcabadoItem:
+        """Map a DB row to AcabadoItem."""
+        return AcabadoItem(
+            id=str(row["id"]),
+            codigo=row["codigo"],
+            nombreSiesa=row["nombre_siesa"],
+            nombre=row.get("nombre"),
+            familia=row.get("familia"),
+            tipoAcabado=row.get("tipo_acabado"),
+            colorBase=row.get("color_base"),
+            descripcion=row.get("descripcion"),
+            notas=row.get("notas"),
+            status=AcabadoStatus(row.get("status", "active")),
+            enrichmentStatus=AcabadoEnrichmentStatus(row.get("enrichment_status", "pendiente")),
+            origen=row.get("origen", "import"),
+            skuCount=row.get("sku_count", 0),
+            subcategorias=subcats or [],
+            createdAt=row.get("created_at"),
+            updatedAt=row.get("updated_at"),
+            createdBy=row.get("created_by"),
+            updatedBy=row.get("updated_by"),
+        )
+
+    async def get_acabados(
+        self, search: Optional[str] = None,
+        tipo_acabado: Optional[str] = None,
+        familia: Optional[str] = None,
+        status: Optional[str] = None,
+        enrichment: Optional[str] = None,
+        subcategoria: Optional[str] = None,
+    ) -> AcabadoListResponse:
+        """Get all acabados from dedicated acabados table with filters."""
         sb = _sb()
-        query = sb.table("classifications").select("*").eq("dimension", "acabado")
+        query = sb.table("acabados").select("*")
 
         if search:
             query = query.or_(
-                f"original_value.ilike.%{search}%,normalized_value.ilike.%{search}%,code.ilike.%{search}%"
+                f"codigo.ilike.%{search}%,nombre_siesa.ilike.%{search}%,"
+                f"nombre.ilike.%{search}%,familia.ilike.%{search}%,"
+                f"color_base.ilike.%{search}%"
             )
+        if tipo_acabado:
+            query = query.eq("tipo_acabado", tipo_acabado)
+        if familia:
+            query = query.eq("familia", familia)
+        if status:
+            query = query.eq("status", status)
+        if enrichment:
+            query = query.eq("enrichment_status", enrichment)
 
-        query = query.order("normalized_value")
+        query = query.order("sku_count", desc=True).order("nombre_siesa")
         result = query.execute()
         rows = result.data or []
 
+        # Get subcategoria mappings for all acabados in one query
+        acabado_ids = [str(r["id"]) for r in rows]
+        sub_map: dict[str, list[str]] = {}
+        if acabado_ids:
+            sa_result = sb.table("subcategoria_acabados").select(
+                "acabado_id, subcategoria"
+            ).in_("acabado_id", acabado_ids).execute()
+            for sa in (sa_result.data or []):
+                aid = str(sa["acabado_id"])
+                sub_map.setdefault(aid, []).append(sa["subcategoria"])
+
+        # If filtering by subcategoria, filter after join
         items = []
         for row in rows:
-            items.append(AcabadoItem(
-                id=str(row["id"]),
-                originalValue=row["original_value"],
-                normalizedValue=row["normalized_value"],
-                code=row.get("code"),
-                status=ClassificationStatus(row.get("status", "active")),
-                skuCount=row.get("sku_count", 0),
-                isEdited=row.get("original_value") != row.get("normalized_value"),
-                createdAt=row.get("created_at"),
-                updatedAt=row.get("updated_at"),
-            ))
+            rid = str(row["id"])
+            subcats = sub_map.get(rid, [])
+            if subcategoria and subcategoria not in subcats:
+                continue
+            items.append(self._row_to_acabado(row, subcats))
 
-        active = sum(1 for it in items if it.status == ClassificationStatus.active)
-        edited = sum(1 for it in items if it.isEdited)
+        # Compute stats
+        anodizado = sum(1 for it in items if it.tipoAcabado == "anodizado")
+        pintura = sum(1 for it in items if it.tipoAcabado == "pintura")
+        mill = sum(1 for it in items if it.tipoAcabado == "mill_finish")
+        otro = sum(1 for it in items if it.tipoAcabado in ("sublimado", "otro"))
+        sin_tipo = sum(1 for it in items if not it.tipoAcabado)
+        active = sum(1 for it in items if it.status == AcabadoStatus.active)
+        pendientes = sum(1 for it in items if it.enrichmentStatus == AcabadoEnrichmentStatus.pendiente)
+        parcial = sum(1 for it in items if it.enrichmentStatus == AcabadoEnrichmentStatus.parcial)
+        completo = sum(1 for it in items if it.enrichmentStatus == AcabadoEnrichmentStatus.completo)
 
         return AcabadoListResponse(
             items=items,
-            stats=ClassificationStats(
+            stats=AcabadoStats(
                 total=len(items),
-                edited=edited,
+                anodizado=anodizado,
+                pintura=pintura,
+                millFinish=mill,
+                otro=otro,
+                sinTipo=sin_tipo,
                 active=active,
                 inactive=len(items) - active,
+                pendientes=pendientes,
+                parcial=parcial,
+                completo=completo,
             ),
         )
 
-    async def create_acabado(self, data: ClassificationCreateRequest) -> AcabadoItem:
-        """Create a new acabado in Supabase."""
+    async def get_acabado_by_id(self, acabado_id: str) -> Optional[AcabadoItem]:
+        """Get a single acabado with its subcategorias and changelog."""
         sb = _sb()
-        record = {
-            "dimension": "acabado",
-            "original_value": data.originalValue,
-            "normalized_value": data.normalizedValue,
-            "status": "active",
-            "created_by": "user",
-        }
-        result = sb.table("classifications").insert(record).execute()
-        row = result.data[0]
-
-        return AcabadoItem(
-            id=str(row["id"]),
-            originalValue=row["original_value"],
-            normalizedValue=row["normalized_value"],
-            code=row.get("code"),
-            status=ClassificationStatus.active,
-            skuCount=0,
-            createdAt=row.get("created_at"),
-        )
-
-    async def update_acabado(
-        self, original_value: str, data: ClassificationUpdateRequest
-    ) -> Optional[AcabadoItem]:
-        """Update an existing acabado in Supabase."""
-        sb = _sb()
-        updates = {}
-        if data.normalizedValue is not None:
-            updates["normalized_value"] = data.normalizedValue
-        if data.status is not None:
-            updates["status"] = data.status.value
-
-        if not updates:
-            return None
-
-        result = sb.table("classifications").update(updates).eq(
-            "dimension", "acabado"
-        ).eq("original_value", original_value).execute()
-
+        result = sb.table("acabados").select("*").eq("id", acabado_id).maybe_single().execute()
         if not result.data:
             return None
 
-        row = result.data[0]
-        return AcabadoItem(
-            id=str(row["id"]),
-            originalValue=row["original_value"],
-            normalizedValue=row["normalized_value"],
-            code=row.get("code"),
-            status=ClassificationStatus(row.get("status", "active")),
-            skuCount=row.get("sku_count", 0),
-            isEdited=row.get("original_value") != row.get("normalized_value"),
-            updatedAt=row.get("updated_at"),
-        )
+        row = result.data
+        # Get subcategorias
+        sa_result = sb.table("subcategoria_acabados").select("subcategoria").eq(
+            "acabado_id", acabado_id
+        ).execute()
+        subcats = [s["subcategoria"] for s in (sa_result.data or [])]
 
-    async def bulk_acabado_action(self, action_data: BulkActionRequest) -> dict:
+        # Get changelog
+        cl_result = sb.table("acabado_changelog").select("*").eq(
+            "acabado_id", acabado_id
+        ).order("changed_at", desc=True).limit(20).execute()
+        changelog = [
+            ChangeLogEntry(
+                date=c.get("changed_at", ""),
+                action=c.get("action", ""),
+                old_value=c.get("old_value"),
+                new_value=c.get("new_value"),
+                user=c.get("changed_by"),
+            )
+            for c in (cl_result.data or [])
+        ]
+
+        item = self._row_to_acabado(row, subcats)
+        item.changeLog = changelog
+        return item
+
+    async def create_acabado(
+        self, data: AcabadoCreateRequest, user_name: str = "system"
+    ) -> AcabadoItem:
+        """Create a new acabado manually."""
+        sb = _sb()
+
+        # Compute enrichment status
+        enrichment = "pendiente"
+        filled = sum(1 for v in [data.tipoAcabado, data.colorBase, data.familia, data.descripcion] if v)
+        if filled >= 3:
+            enrichment = "completo"
+        elif filled > 0:
+            enrichment = "parcial"
+
+        record = {
+            "codigo": data.codigo,
+            "nombre_siesa": data.nombreSiesa,
+            "nombre": data.nombre or data.nombreSiesa,
+            "familia": data.familia,
+            "tipo_acabado": data.tipoAcabado,
+            "color_base": data.colorBase,
+            "descripcion": data.descripcion,
+            "notas": data.notas,
+            "status": "active",
+            "enrichment_status": enrichment,
+            "origen": "manual",
+            "created_by": user_name,
+            "updated_by": user_name,
+        }
+        result = sb.table("acabados").insert(record).execute()
+        row = result.data[0]
+
+        # Log creation
+        sb.table("acabado_changelog").insert({
+            "acabado_id": row["id"],
+            "action": "Creado manualmente",
+            "changed_by": user_name,
+        }).execute()
+
+        return self._row_to_acabado(row)
+
+    async def update_acabado(
+        self, acabado_id: str, data: AcabadoUpdateRequest, user_name: str = "system"
+    ) -> Optional[AcabadoItem]:
+        """Update acabado App-owned fields, log changes."""
+        sb = _sb()
+
+        # Fetch current for changelog
+        current = sb.table("acabados").select("*").eq("id", acabado_id).maybe_single().execute()
+        if not current.data:
+            return None
+        old = current.data
+
+        updates: dict = {}
+        field_map = {
+            "nombre": "nombre", "familia": "familia",
+            "tipoAcabado": "tipo_acabado", "colorBase": "color_base",
+            "descripcion": "descripcion", "notas": "notas",
+        }
+        changes = []
+        for schema_field, db_field in field_map.items():
+            new_val = getattr(data, schema_field, None)
+            if new_val is not None:
+                old_val = old.get(db_field)
+                if new_val != old_val:
+                    updates[db_field] = new_val
+                    changes.append((db_field, str(old_val or ""), str(new_val)))
+
+        if data.status is not None and data.status.value != old.get("status"):
+            updates["status"] = data.status.value
+            changes.append(("status", old.get("status", ""), data.status.value))
+
+        if not updates:
+            return self._row_to_acabado(old)
+
+        # Recompute enrichment_status
+        merged = {**old, **updates}
+        filled = sum(1 for k in ["tipo_acabado", "color_base", "familia", "descripcion"]
+                     if merged.get(k))
+        if filled >= 3:
+            updates["enrichment_status"] = "completo"
+        elif filled > 0:
+            updates["enrichment_status"] = "parcial"
+        else:
+            updates["enrichment_status"] = "pendiente"
+
+        updates["updated_by"] = user_name
+        result = sb.table("acabados").update(updates).eq("id", acabado_id).execute()
+
+        # Log each change
+        for field, old_val, new_val in changes:
+            sb.table("acabado_changelog").insert({
+                "acabado_id": acabado_id,
+                "action": f"Campo '{field}' actualizado",
+                "field": field,
+                "old_value": old_val,
+                "new_value": new_val,
+                "changed_by": user_name,
+            }).execute()
+
+        if not result.data:
+            return None
+        return self._row_to_acabado(result.data[0])
+
+    async def bulk_acabado_action(
+        self, action_data: AcabadoBulkActionRequest, user_name: str = "system"
+    ) -> dict:
         """Handle bulk actions on acabados."""
         sb = _sb()
         affected = 0
 
-        if action_data.action.value in ("rename", "merge") and action_data.newValue:
-            for ov in action_data.ids:
-                sb.table("classifications").update(
-                    {"normalized_value": action_data.newValue}
-                ).eq("dimension", "acabado").eq("original_value", ov).execute()
+        if action_data.action.value == "rename" and action_data.newValue:
+            for rid in action_data.ids:
+                sb.table("acabados").update(
+                    {"nombre": action_data.newValue, "updated_by": user_name}
+                ).eq("id", rid).execute()
+                affected += 1
+
+        elif action_data.action.value == "set_tipo" and action_data.newValue:
+            for rid in action_data.ids:
+                sb.table("acabados").update(
+                    {"tipo_acabado": action_data.newValue, "updated_by": user_name}
+                ).eq("id", rid).execute()
+                affected += 1
+
+        elif action_data.action.value == "set_familia" and action_data.newValue:
+            for rid in action_data.ids:
+                sb.table("acabados").update(
+                    {"familia": action_data.newValue, "updated_by": user_name}
+                ).eq("id", rid).execute()
                 affected += 1
 
         elif action_data.action.value == "inactivate":
-            for ov in action_data.ids:
-                sb.table("classifications").update(
-                    {"status": "inactive"}
-                ).eq("dimension", "acabado").eq("original_value", ov).execute()
+            for rid in action_data.ids:
+                sb.table("acabados").update(
+                    {"status": "inactive", "updated_by": user_name}
+                ).eq("id", rid).execute()
+                affected += 1
+
+        elif action_data.action.value == "activate":
+            for rid in action_data.ids:
+                sb.table("acabados").update(
+                    {"status": "active", "updated_by": user_name}
+                ).eq("id", rid).execute()
                 affected += 1
 
         elif action_data.action.value == "delete":
-            for ov in action_data.ids:
-                sb.table("classifications").delete().eq(
-                    "dimension", "acabado"
-                ).eq("original_value", ov).execute()
+            for rid in action_data.ids:
+                sb.table("acabados").delete().eq("id", rid).execute()
                 affected += 1
 
         elif action_data.action.value == "export":
-            affected = len(action_data.ids)
+            items = []
+            for rid in action_data.ids:
+                r = sb.table("acabados").select("*").eq("id", rid).execute()
+                if r.data:
+                    items.append(r.data[0])
+            return {"action": "export", "affected": len(items), "items": items}
 
         return {
             "action": action_data.action.value,
             "affected": affected,
             "message": f"Accion '{action_data.action.value}' aplicada a {affected} acabados",
         }
+
+    async def get_acabado_filter_options(self) -> dict:
+        """Get distinct values for filter dropdowns."""
+        sb = _sb()
+        rows = sb.table("acabados").select(
+            "tipo_acabado, familia, color_base"
+        ).execute().data or []
+
+        tipos = sorted(set(r["tipo_acabado"] for r in rows if r.get("tipo_acabado")))
+        familias = sorted(set(r["familia"] for r in rows if r.get("familia")))
+        colores = sorted(set(r["color_base"] for r in rows if r.get("color_base")))
+
+        # Subcategorias from the junction table
+        sa_rows = sb.table("subcategoria_acabados").select("subcategoria").execute().data or []
+        subcats = sorted(set(r["subcategoria"] for r in sa_rows))
+
+        return {"tipos": tipos, "familias": familias, "colores": colores, "subcategorias": subcats}
 
     # ── Dashboard Summary ──
 
@@ -503,7 +931,7 @@ class ProductsService:
         # Count classifications
         cats = sb.table("classifications").select("id", count="exact").eq("dimension", "categoria").execute()
         subs = sb.table("classifications").select("id", count="exact").eq("dimension", "subcategoria").execute()
-        acabados = sb.table("classifications").select("id", count="exact").eq("dimension", "acabado").execute()
+        acabados = sb.table("acabados").select("id", count="exact").execute()
 
         # Count warehouses
         wh = sb.table("warehouses").select("id", count="exact").execute()
@@ -522,23 +950,37 @@ class ProductsService:
         """Get paginated list of base products with variant counts."""
         sb = _sb()
 
-        # Build main query
+        # Build main query — include categoria_raw and product_type
         query = sb.table("products").select(
-            "id, reference, description, subcategoria_raw, sistema_raw, "
-            "linea_raw, peso_um, is_profile, status",
+            "id, reference, description, categoria_raw, subcategoria_raw, "
+            "sistema_raw, linea_raw, peso_um, is_profile, product_type, status, technical_specs",
             count="exact",
         )
 
-        # Apply filters
+        # Helper for multi-value params
+        def split_multi(val):
+            if not val:
+                return []
+            return [v.strip() for v in val.split(",") if v.strip()]
+
+        # Apply filters — support comma-separated multi-select
         if params.search:
             s = params.search
             query = query.or_(f"reference.ilike.%{s}%,description.ilike.%{s}%")
+        if params.categoria:
+            vals = split_multi(params.categoria)
+            raws = [await self._reverse_lookup("categoria", v) for v in vals]
+            query = query.in_("categoria_raw", raws) if len(raws) > 1 else query.eq("categoria_raw", raws[0])
         if params.subcategory:
-            query = query.eq("subcategoria_raw", params.subcategory)
+            vals = split_multi(params.subcategory)
+            raws = [await self._reverse_lookup("subcategoria", v) for v in vals]
+            query = query.in_("subcategoria_raw", raws) if len(raws) > 1 else query.eq("subcategoria_raw", raws[0])
         if params.sistema:
-            query = query.eq("sistema_raw", params.sistema)
-        if params.is_profile is not None:
-            query = query.eq("is_profile", params.is_profile)
+            vals = split_multi(params.sistema)
+            raws = [await self._reverse_lookup("sistema", v) for v in vals]
+            query = query.in_("sistema_raw", raws) if len(raws) > 1 else query.eq("sistema_raw", raws[0])
+        if params.product_type:
+            query = query.eq("product_type", params.product_type)
         if params.status:
             query = query.eq("status", params.status)
 
@@ -546,8 +988,10 @@ class ProductsService:
         sort_map = {
             "reference": "reference",
             "description": "description",
+            "categoria": "categoria_raw",
             "subcategoria": "subcategoria_raw",
             "sistema": "sistema_raw",
+            "productType": "product_type",
             "pesoUm": "peso_um",
         }
         sort_field = sort_map.get(params.sort_field, params.sort_field) if params.sort_field else "reference"
@@ -562,15 +1006,15 @@ class ProductsService:
         rows = result.data or []
         total = result.count if result.count is not None else len(rows)
 
-        # Get variant counts for the returned product IDs in one query
+        # Get variant counts via SQL GROUP BY (single RPC call)
         product_ids = [r["id"] for r in rows]
         variant_counts: dict = {}
         if product_ids:
-            vc_result = sb.table("product_variants").select(
-                "product_id"
-            ).in_("product_id", product_ids).execute()
-            vc_rows = vc_result.data or []
-            variant_counts = Counter(r["product_id"] for r in vc_rows)
+            vc_result = sb.rpc("get_variant_counts", {"p_product_ids": product_ids}).execute()
+            variant_counts = {r["product_id"]: r["cnt"] for r in (vc_result.data or [])}
+
+        # Load classification maps for normalized display names
+        cls_maps = await self._get_classification_maps()
 
         items = []
         for row in rows:
@@ -578,20 +1022,40 @@ class ProductsService:
                 id=row["id"],
                 reference=row.get("reference", ""),
                 description=row.get("description"),
-                subcategoria=row.get("subcategoria_raw"),
-                sistema=row.get("sistema_raw"),
+                categoria=self._normalize(row.get("categoria_raw"), cls_maps["categoria"]),
+                subcategoria=self._normalize(row.get("subcategoria_raw"), cls_maps["subcategoria"]),
+                sistema=self._normalize(row.get("sistema_raw"), cls_maps["sistema"]),
                 linea=row.get("linea_raw"),
+                productType=row.get("product_type") or "Otro",
                 pesoUm=float(row.get("peso_um") or 0),
                 isProfile=bool(row.get("is_profile")),
                 variantCount=variant_counts.get(row["id"], 0),
                 status="Activo" if row.get("status") == "active" else "Inactivo",
+                technicalSpecs=row.get("technical_specs") or {},
             ))
+
+        # Get type counts from FULL dataset using individual count queries
+        # (avoids Supabase 1000-row default limit on select)
+        type_counts_raw: dict[str, int] = {}
+        for pt in ["Perfil", "Lamina", "Escalera", "Accesorio", "Otro"]:
+            tc_q = sb.table("products").select("id", count="exact").eq("product_type", pt)
+            tc_r = tc_q.limit(1).execute()
+            type_counts_raw[pt] = tc_r.count if tc_r.count is not None else 0
+
+        type_counts = ProductBaseTypeCounts(
+            perfil=type_counts_raw.get("Perfil", 0),
+            lamina=type_counts_raw.get("Lamina", 0),
+            escalera=type_counts_raw.get("Escalera", 0),
+            accesorio=type_counts_raw.get("Accesorio", 0),
+            otro=type_counts_raw.get("Otro", 0),
+        )
 
         return ProductBaseListResponse(
             items=items,
             total=total,
             page=params.page,
             page_size=params.page_size,
+            typeCounts=type_counts,
         )
 
     async def get_base_product_detail(self, product_id: int) -> Optional[ProductBaseDetailResponse]:
@@ -623,8 +1087,19 @@ class ProductsService:
             isProfile=bool(row.get("is_profile")),
             variantCount=len(variants),
             status="Activo" if row.get("status") == "active" else "Inactivo",
+            technicalSpecs=row.get("technical_specs") or {},
             variants=variants,
         )
+
+    async def update_technical_specs(self, product_id: int, specs: dict) -> dict:
+        """Save technical_specs JSONB for a base product."""
+        sb = _sb()
+        result = sb.table("products").update(
+            {"technical_specs": specs}
+        ).eq("id", product_id).execute()
+        if not result.data:
+            raise ValueError("Producto no encontrado")
+        return result.data[0].get("technical_specs") or {}
 
     # ── Warehouse Records ──
 
@@ -724,62 +1199,86 @@ class ProductsService:
     # ── Enhanced Summary ──
 
     async def get_products_summary(self) -> ProductsSummaryResponse:
-        """Get comprehensive KPIs across products, variants, and warehouse records."""
+        """Get comprehensive KPIs across products, variants, and warehouse records.
+
+        All independent Supabase queries run in parallel via asyncio.to_thread
+        for ~3-4x speedup vs the previous sequential approach.
+        """
         sb = _sb()
+        six_months_ago = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
 
-        # ── Products counts ──
-        products_total_r = sb.table("products").select("id", count="exact").execute()
+        # Define all independent queries as sync callables
+        def q_products_total():
+            return sb.table("products").select("id", count="exact").execute()
+
+        def q_profiles():
+            return sb.table("products").select("id", count="exact").eq("is_profile", True).execute()
+
+        def q_distinct_pids():
+            return sb.table("product_variants").select("product_id").execute()
+
+        def q_variants_total():
+            return sb.table("product_variants").select("id", count="exact").execute()
+
+        def q_variants_active():
+            return sb.table("product_variants").select("id", count="exact").eq("status", "active").execute()
+
+        def q_wh_total():
+            return sb.table("product_warehouse").select("id", count="exact").execute()
+
+        def q_wh_summary():
+            return sb.rpc("get_warehouse_summary").execute()
+
+        def q_no_sales_null():
+            return sb.table("product_warehouse").select("id", count="exact").is_(
+                "fecha_ultima_venta", "null"
+            ).execute()
+
+        def q_no_sales_old():
+            return sb.table("product_warehouse").select("id", count="exact").lt(
+                "fecha_ultima_venta", six_months_ago
+            ).execute()
+
+        # Run all queries in parallel (11 → 9 queries: warehouse summary RPC replaces 3)
+        (
+            products_total_r, profiles_r, distinct_pids_r,
+            variants_total_r, variants_active_r,
+            wh_total_r, wh_summary_r,
+            no_sales_null_r, no_sales_old_r,
+        ) = await asyncio.gather(
+            asyncio.to_thread(q_products_total),
+            asyncio.to_thread(q_profiles),
+            asyncio.to_thread(q_distinct_pids),
+            asyncio.to_thread(q_variants_total),
+            asyncio.to_thread(q_variants_active),
+            asyncio.to_thread(q_wh_total),
+            asyncio.to_thread(q_wh_summary),
+            asyncio.to_thread(q_no_sales_null),
+            asyncio.to_thread(q_no_sales_old),
+        )
+
+        # ── Aggregate results ──
         products_total = products_total_r.count or 0
-
-        profiles_r = sb.table("products").select("id", count="exact").eq("is_profile", True).execute()
         profiles_count = profiles_r.count or 0
         accessories_count = products_total - profiles_count
-
-        # Products without variants: total products minus distinct product_ids in variants
-        distinct_pids_r = sb.table("product_variants").select("product_id").execute()
         distinct_pids = set(r["product_id"] for r in (distinct_pids_r.data or []))
         without_variants = products_total - len(distinct_pids)
 
-        # ── Variants counts ──
-        variants_total_r = sb.table("product_variants").select("id", count="exact").execute()
         variants_total = variants_total_r.count or 0
-
-        variants_active_r = sb.table("product_variants").select("id", count="exact").eq("status", "active").execute()
         variants_active = variants_active_r.count or 0
         variants_inactive = variants_total - variants_active
 
-        # Variants without warehouse record
-        distinct_vids_r = sb.table("product_warehouse").select("variant_id").execute()
-        distinct_vids = set(r["variant_id"] for r in (distinct_vids_r.data or []))
-        without_warehouse = variants_total - len(distinct_vids)
+        # Warehouse summary from single RPC (replaces 3 separate queries)
+        wh_summary = (wh_summary_r.data or [{}])
+        if isinstance(wh_summary, list):
+            wh_summary = wh_summary[0] if wh_summary else {}
+        total_inventory_value = float(wh_summary.get("total_inventory_value", 0))
+        distinct_variant_count = int(wh_summary.get("distinct_variants", 0))
+        active_bodegas = int(wh_summary.get("distinct_warehouses", 0))
+        without_warehouse = variants_total - distinct_variant_count
 
-        # ── Warehouse counts ──
-        wh_total_r = sb.table("product_warehouse").select("id", count="exact").execute()
         wh_total_records = wh_total_r.count or 0
-
-        # Total inventory value: sum costo_promedio_total
-        inv_r = sb.table("product_warehouse").select("costo_promedio_total").execute()
-        inv_rows = inv_r.data or []
-        total_inventory_value = sum(float(r.get("costo_promedio_total") or 0) for r in inv_rows)
-
-        # Active bodegas (distinct warehouse_ids in product_warehouse)
-        wh_ids = set(r["variant_id"] for r in (distinct_vids_r.data or []))  # reuse query
-        # Actually need distinct warehouse_ids
-        distinct_whids_r = sb.table("product_warehouse").select("warehouse_id").execute()
-        active_bodegas = len(set(r["warehouse_id"] for r in (distinct_whids_r.data or [])))
-
-        # No sales in 6 months: fecha_ultima_venta is null or < 6 months ago
-        six_months_ago = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
-        no_sales_null_r = sb.table("product_warehouse").select("id", count="exact").is_(
-            "fecha_ultima_venta", "null"
-        ).execute()
-        no_sales_null = no_sales_null_r.count or 0
-
-        no_sales_old_r = sb.table("product_warehouse").select("id", count="exact").lt(
-            "fecha_ultima_venta", six_months_ago
-        ).execute()
-        no_sales_old = no_sales_old_r.count or 0
-        no_sales_6m = no_sales_null + no_sales_old
+        no_sales_6m = (no_sales_null_r.count or 0) + (no_sales_old_r.count or 0)
 
         return ProductsSummaryResponse(
             products={
@@ -811,6 +1310,283 @@ class ProductsService:
             "is_active", True
         ).order("name").execute()
         return {"items": result.data or []}
+
+
+    # ══════════════════════════════════════════════════════════════
+    # Generic Product Attributes (product_attributes table)
+    # ══════════════════════════════════════════════════════════════
+
+    def _row_to_attribute(self, row: dict, changelog: list = None) -> AttributeItem:
+        """Map a DB row to an AttributeItem."""
+        return AttributeItem(
+            id=row["id"],
+            dimension=row["dimension"],
+            productType=row["product_type"],
+            codigo=row["codigo"],
+            nombreSiesa=row["nombre_siesa"],
+            nombre=row.get("nombre"),
+            descripcion=row.get("descripcion"),
+            notas=row.get("notas"),
+            metadata=row.get("metadata") or {},
+            status=row.get("status", "active"),
+            enrichmentStatus=row.get("enrichment_status", "pendiente"),
+            skuCount=row.get("sku_count", 0),
+            origen=row.get("origen", "import"),
+            createdAt=str(row["created_at"]) if row.get("created_at") else None,
+            updatedAt=str(row["updated_at"]) if row.get("updated_at") else None,
+            createdBy=row.get("created_by"),
+            updatedBy=row.get("updated_by"),
+            changeLog=[
+                ChangeLogEntry(
+                    date=str(e["changed_at"]),
+                    action=e.get("action", ""),
+                    old_value=e.get("old_value"),
+                    new_value=e.get("new_value"),
+                    user=e.get("changed_by"),
+                )
+                for e in (changelog or [])
+            ],
+        )
+
+    def _compute_attribute_enrichment(self, row: dict) -> str:
+        """Compute enrichment status based on filled fields."""
+        fields = ["nombre", "descripcion", "notas"]
+        filled = sum(1 for f in fields if row.get(f))
+        meta = row.get("metadata") or {}
+        filled += sum(1 for v in meta.values() if v)
+        total = len(fields) + len(meta)
+        if total == 0:
+            return "pendiente"
+        ratio = filled / max(total, 1)
+        if ratio >= 0.8:
+            return "completo"
+        elif ratio > 0:
+            return "parcial"
+        return "pendiente"
+
+    async def get_attributes(
+        self,
+        dimension: str,
+        product_type: str = None,
+        search: str = None,
+        status: str = None,
+        enrichment: str = None,
+    ) -> AttributeListResponse:
+        """List attributes for a dimension with optional filters."""
+        sb = _sb()
+        query = sb.table("product_attributes").select("*").eq("dimension", dimension)
+
+        if product_type:
+            query = query.eq("product_type", product_type)
+        if status:
+            query = query.eq("status", status)
+        if enrichment:
+            query = query.eq("enrichment_status", enrichment)
+        if search:
+            query = query.or_(
+                f"codigo.ilike.%{search}%,"
+                f"nombre_siesa.ilike.%{search}%,"
+                f"nombre.ilike.%{search}%"
+            )
+
+        query = query.order("sku_count", desc=True)
+        result = query.execute()
+        rows = result.data or []
+
+        items = [self._row_to_attribute(r) for r in rows]
+
+        # Compute stats
+        stats = AttributeStats(
+            total=len(rows),
+            active=sum(1 for r in rows if r.get("status") == "active"),
+            inactive=sum(1 for r in rows if r.get("status") != "active"),
+            pendientes=sum(1 for r in rows if r.get("enrichment_status") == "pendiente"),
+            parcial=sum(1 for r in rows if r.get("enrichment_status") == "parcial"),
+            completo=sum(1 for r in rows if r.get("enrichment_status") == "completo"),
+        )
+
+        return AttributeListResponse(items=items, stats=stats)
+
+    async def get_attribute_by_id(self, dimension: str, attribute_id: str) -> Optional[AttributeItem]:
+        """Get a single attribute with changelog."""
+        sb = _sb()
+        result = sb.table("product_attributes").select("*").eq("id", attribute_id).eq("dimension", dimension).execute()
+        if not result.data:
+            return None
+        row = result.data[0]
+
+        # Fetch changelog
+        cl_result = sb.table("product_attribute_changelog").select("*").eq(
+            "attribute_id", attribute_id
+        ).order("changed_at", desc=True).limit(50).execute()
+
+        return self._row_to_attribute(row, cl_result.data or [])
+
+    async def get_attribute_filter_options(self, dimension: str, product_type: str = None) -> dict:
+        """Get distinct filter values for a dimension."""
+        sb = _sb()
+        query = sb.table("product_attributes").select(
+            "status, enrichment_status"
+        ).eq("dimension", dimension)
+        if product_type:
+            query = query.eq("product_type", product_type)
+        result = query.execute()
+        rows = result.data or []
+
+        statuses = sorted(set(r["status"] for r in rows if r.get("status")))
+        enrichments = sorted(set(r["enrichment_status"] for r in rows if r.get("enrichment_status")))
+
+        return {"statuses": statuses, "enrichments": enrichments}
+
+    async def create_attribute(
+        self, dimension: str, data: AttributeCreateRequest, user_name: str = "system"
+    ) -> AttributeItem:
+        """Create a new product attribute."""
+        sb = _sb()
+        now = datetime.utcnow().isoformat()
+
+        row_data = {
+            "dimension": dimension,
+            "product_type": data.productType,
+            "codigo": data.codigo,
+            "nombre_siesa": data.nombreSiesa,
+            "nombre": data.nombre or data.nombreSiesa,
+            "descripcion": data.descripcion,
+            "notas": data.notas,
+            "metadata": data.metadata or {},
+            "status": "active",
+            "origen": "manual",
+            "created_at": now,
+            "updated_at": now,
+            "created_by": user_name,
+            "updated_by": user_name,
+        }
+        row_data["enrichment_status"] = self._compute_attribute_enrichment(row_data)
+
+        result = sb.table("product_attributes").insert(row_data).execute()
+        new_row = result.data[0]
+
+        # Changelog entry
+        sb.table("product_attribute_changelog").insert({
+            "attribute_id": new_row["id"],
+            "action": "Creado manualmente",
+            "changed_by": user_name,
+            "changed_at": now,
+        }).execute()
+
+        return self._row_to_attribute(new_row)
+
+    async def update_attribute(
+        self, dimension: str, attribute_id: str, data: AttributeUpdateRequest, user_name: str = "system"
+    ) -> Optional[AttributeItem]:
+        """Update app-owned fields of a product attribute."""
+        sb = _sb()
+
+        # Fetch current
+        current_result = sb.table("product_attributes").select("*").eq(
+            "id", attribute_id
+        ).eq("dimension", dimension).execute()
+        if not current_result.data:
+            return None
+        current = current_result.data[0]
+
+        now = datetime.utcnow().isoformat()
+        updates = {"updated_at": now, "updated_by": user_name}
+        changelog_entries = []
+
+        field_map = {
+            "nombre": data.nombre,
+            "descripcion": data.descripcion,
+            "notas": data.notas,
+            "status": data.status,
+        }
+
+        for db_field, new_val in field_map.items():
+            if new_val is not None and str(new_val) != str(current.get(db_field) or ""):
+                old_val = current.get(db_field) or ""
+                updates[db_field] = new_val
+                changelog_entries.append({
+                    "attribute_id": attribute_id,
+                    "action": f"Campo '{db_field}' actualizado",
+                    "field": db_field,
+                    "old_value": str(old_val),
+                    "new_value": str(new_val),
+                    "changed_by": user_name,
+                    "changed_at": now,
+                })
+
+        if data.metadata is not None:
+            updates["metadata"] = data.metadata
+            changelog_entries.append({
+                "attribute_id": attribute_id,
+                "action": "Metadata actualizada",
+                "changed_by": user_name,
+                "changed_at": now,
+            })
+
+        # Recompute enrichment
+        merged = {**current, **updates}
+        updates["enrichment_status"] = self._compute_attribute_enrichment(merged)
+
+        sb.table("product_attributes").update(updates).eq("id", attribute_id).execute()
+
+        if changelog_entries:
+            sb.table("product_attribute_changelog").insert(changelog_entries).execute()
+
+        return await self.get_attribute_by_id(dimension, attribute_id)
+
+    async def bulk_attribute_action(
+        self, dimension: str, action_data: AttributeBulkActionRequest, user_name: str = "system"
+    ) -> dict:
+        """Execute bulk action on product attributes."""
+        sb = _sb()
+        now = datetime.utcnow().isoformat()
+        ids = action_data.ids
+        action = action_data.action.value
+
+        if action == "rename" and action_data.newValue:
+            for aid in ids:
+                sb.table("product_attributes").update({
+                    "nombre": action_data.newValue,
+                    "updated_at": now,
+                    "updated_by": user_name,
+                }).eq("id", aid).eq("dimension", dimension).execute()
+                sb.table("product_attribute_changelog").insert({
+                    "attribute_id": aid,
+                    "action": "Renombrado (bulk)",
+                    "field": "nombre",
+                    "new_value": action_data.newValue,
+                    "changed_by": user_name,
+                    "changed_at": now,
+                }).execute()
+
+        elif action == "activate":
+            for aid in ids:
+                sb.table("product_attributes").update({
+                    "status": "active", "updated_at": now, "updated_by": user_name,
+                }).eq("id", aid).eq("dimension", dimension).execute()
+                sb.table("product_attribute_changelog").insert({
+                    "attribute_id": aid, "action": "Activado (bulk)",
+                    "field": "status", "old_value": "inactive", "new_value": "active",
+                    "changed_by": user_name, "changed_at": now,
+                }).execute()
+
+        elif action == "inactivate":
+            for aid in ids:
+                sb.table("product_attributes").update({
+                    "status": "inactive", "updated_at": now, "updated_by": user_name,
+                }).eq("id", aid).eq("dimension", dimension).execute()
+                sb.table("product_attribute_changelog").insert({
+                    "attribute_id": aid, "action": "Inactivado (bulk)",
+                    "field": "status", "old_value": "active", "new_value": "inactive",
+                    "changed_by": user_name, "changed_at": now,
+                }).execute()
+
+        elif action == "delete":
+            for aid in ids:
+                sb.table("product_attributes").delete().eq("id", aid).eq("dimension", dimension).execute()
+
+        return {"ok": True, "affected": len(ids)}
 
 
 # ── Singleton instance ──

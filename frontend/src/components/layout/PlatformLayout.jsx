@@ -65,16 +65,14 @@ export default function PlatformLayout({ children }) {
           <TopBar />
         </Box>
 
-        {/* Page content — centered with max-width, fade-in on route change */}
+        {/* Page content — fluid width, fade-in on route change */}
         <Fade in key={pathname} timeout={250}>
           <Box
             sx={{
               flex: 1,
-              px: { xs: 2, sm: 3, md: 3, lg: 4 },
+              px: { xs: 2, sm: 3, md: 3, lg: 4, xl: 5 },
               py: 3,
-              mx: 'auto',
               width: '100%',
-              maxWidth: 1280,
             }}
           >
             {children}

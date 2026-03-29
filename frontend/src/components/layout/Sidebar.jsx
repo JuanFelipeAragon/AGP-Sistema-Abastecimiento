@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   Drawer, List, ListItemButton, ListItemIcon, ListItemText,
   Tooltip, Typography, Box, useMediaQuery, useTheme,
@@ -24,6 +24,10 @@ import SearchIcon from '@mui/icons-material/Search';
 import ViewListIcon from '@mui/icons-material/ViewList';
 import AccountTreeIcon from '@mui/icons-material/AccountTree';
 import PaletteIcon from '@mui/icons-material/Palette';
+import TuneIcon from '@mui/icons-material/Tune';
+import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
+import PublicIcon from '@mui/icons-material/Public';
+import UploadFileIcon from '@mui/icons-material/UploadFile';
 
 export const SIDEBAR_WIDTH_EXPANDED = 260;
 export const SIDEBAR_WIDTH_COLLAPSED = 72;
@@ -70,9 +74,13 @@ const MODULE_GROUPS = [
         icon: <CategoryIcon fontSize="small" />,
         path: '/platform/productos',
         children: [
-          { key: 'products-catalog', label: 'Catálogo SKUs', icon: <ViewListIcon fontSize="small" />, path: '/platform/productos?tab=0' },
-          { key: 'products-classifications', label: 'Clasificaciones', icon: <AccountTreeIcon fontSize="small" />, path: '/platform/productos?tab=1' },
-          { key: 'products-finishes', label: 'Acabados', icon: <PaletteIcon fontSize="small" />, path: '/platform/productos?tab=2' },
+          { key: 'products-all', label: 'Ver Todos', icon: <ViewListIcon fontSize="small" />, path: '/platform/productos' },
+          { key: 'products-base', label: 'Productos Base', icon: <Inventory2OutlinedIcon fontSize="small" />, path: '/platform/productos/base' },
+          { key: 'products-variants', label: 'Variantes', icon: <AccountTreeIcon fontSize="small" />, path: '/platform/productos/variantes' },
+          { key: 'products-warehouses', label: 'Productos-Bodegas', icon: <WarehouseIcon fontSize="small" />, path: '/platform/productos/bodegas' },
+          { key: 'products-classifications', label: 'Clasificaciones', icon: <CategoryIcon fontSize="small" />, path: '/platform/productos/clasificaciones' },
+          { key: 'products-finishes', label: 'Acabados', icon: <PaletteIcon fontSize="small" />, path: '/platform/productos/acabados' },
+          { key: 'products-attributes', label: 'Atributos', icon: <TuneIcon fontSize="small" />, path: '/platform/productos/atributos' },
         ],
       },
       { key: 'inventory', label: 'Inventario', icon: <Inventory2Icon fontSize="small" />, path: '/platform/inventario' },
@@ -93,7 +101,17 @@ const MODULE_GROUPS = [
     label: 'Administración',
     items: [
       { key: 'users', label: 'Usuarios', icon: <PeopleIcon fontSize="small" />, path: '/platform/usuarios' },
-      { key: 'settings', label: 'Configuración', icon: <SettingsIcon fontSize="small" />, path: '/platform/configuracion' },
+      {
+        key: 'settings',
+        label: 'Configuración',
+        icon: <SettingsIcon fontSize="small" />,
+        path: '/platform/configuracion',
+        children: [
+          { key: 'settings-warehouses', label: 'Bodegas', icon: <WarehouseIcon fontSize="small" />, path: '/platform/configuracion/bodegas' },
+          { key: 'settings-countries', label: 'Paises', icon: <PublicIcon fontSize="small" />, path: '/platform/configuracion/paises' },
+          { key: 'settings-files', label: 'Archivos', icon: <UploadFileIcon fontSize="small" />, path: '/platform/configuracion/archivos' },
+        ],
+      },
     ],
   },
 ];
@@ -508,7 +526,7 @@ export default function Sidebar() {
   const [openSections, setOpenSections] = useState(() =>
     Object.fromEntries(MODULE_GROUPS.map((g) => [g.id, true]))
   );
-  const [expandedItems, setExpandedItems] = useState({ products: true });
+  const [expandedItems, setExpandedItems] = useState({ products: true, settings: true });
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   const collapsed = !sidebarOpen && !isMobile;
@@ -551,19 +569,26 @@ export default function Sidebar() {
     [location.pathname, searchParams]
   );
 
-  // Check if a child sub-item is active (exact match including query params)
+  // Collect parent base paths so index children don't false-positive on prefix match
+  const parentBasePaths = useMemo(() => {
+    const paths = new Set();
+    for (const group of MODULE_GROUPS) {
+      for (const item of group.items) {
+        if (item.children) paths.add(item.path);
+      }
+    }
+    return paths;
+  }, []);
+
+  // Check if a child sub-item is active (exact pathname match)
   const isChildActive = useCallback(
     (child) => {
-      const [basePath, qs] = child.path.split('?');
-      if (!location.pathname.startsWith(basePath)) return false;
-      if (!qs) return location.pathname === basePath;
-      const params = new URLSearchParams(qs);
-      for (const [key, val] of params) {
-        if (searchParams.get(key) !== val) return false;
-      }
-      return true;
+      if (location.pathname === child.path) return true;
+      // For sub-routes, prefix match — but skip parent base paths (index routes)
+      if (!parentBasePaths.has(child.path) && location.pathname.startsWith(child.path)) return true;
+      return false;
     },
-    [location.pathname, searchParams]
+    [location.pathname, parentBasePaths]
   );
 
   const toggleSection = (id) => {

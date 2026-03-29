@@ -27,16 +27,23 @@ def get_settings() -> Settings:
     return Settings()
 
 
+_supabase_client = None
+
+
 def get_supabase_client():
     """
-    Returns a Supabase client using the service key (full access).
+    Returns a cached Supabase client using the service key (full access).
     Used by backend services only — never exposed to frontend.
     """
+    global _supabase_client
+    if _supabase_client is not None:
+        return _supabase_client
     settings = get_settings()
     if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_KEY:
         return None
     try:
         from supabase import create_client
-        return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+        _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+        return _supabase_client
     except Exception:
         return None

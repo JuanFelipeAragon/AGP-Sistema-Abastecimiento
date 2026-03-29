@@ -14,6 +14,10 @@ export default function FormTextField({ name, control, label, helperText, ...pro
           error={!!error}
           helperText={error?.message || helperText}
           fullWidth
+          onFocus={(e) => {
+            if (props.type === 'number' || e.target.type === 'number') e.target.select();
+            props.onFocus?.(e);
+          }}
         />
       )}
     />

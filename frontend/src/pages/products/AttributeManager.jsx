@@ -1,9 +1,11 @@
 /**
- * Acabados Tab — Manage finishes from dedicated acabados table.
- * Features: Animated KPI strip, integrated command bar, unified toolbar,
- * auto-height DataGrid, detail/edit modal with changelog, bulk actions,
- * CSV export, mobile card view, skeleton loading, MUI transitions,
- * enrichment status tracking.
+ * AttributeManager — Generic CRUD for product attributes.
+ * Driven by config from attributeConfigs.js.
+ * mode="acabado" → uses existing acabados API
+ * mode="generic" → uses generic product_attributes API
+ *
+ * Features: KPI strip, command bar, DataGrid, create/edit/detail modals,
+ * bulk actions, CSV export, mobile cards, skeleton loading.
  */
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
@@ -26,33 +28,16 @@ import SaveAltIcon from '@mui/icons-material/SaveAlt';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import EditIcon from '@mui/icons-material/Edit';
 import CloseIcon from '@mui/icons-material/Close';
-import NotesIcon from '@mui/icons-material/StickyNote2Outlined';
-import FormatPaintIcon from '@mui/icons-material/FormatPaint';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ClearAllIcon from '@mui/icons-material/ClearAll';
-import PaletteIcon from '@mui/icons-material/Palette';
-import ColorLensIcon from '@mui/icons-material/ColorLens';
-import OpacityIcon from '@mui/icons-material/Opacity';
-import TextureIcon from '@mui/icons-material/Texture';
-import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
-import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
-import TaskAltIcon from '@mui/icons-material/TaskAlt';
 import PendingIcon from '@mui/icons-material/Pending';
 import RuleIcon from '@mui/icons-material/Rule';
-import CategoryIcon from '@mui/icons-material/Category';
+import TaskAltIcon from '@mui/icons-material/TaskAlt';
 import productsApi from '../../api/products.api';
 import { formatDate } from '../../utils/formatters';
+import { STATUS_OPTIONS, ENRICHMENT_OPTIONS } from './attributeConfigs';
 
-// ══════════════════════════════════════════════════════════════
-// Constants
-// ══════════════════════════════════════════════════════════════
-const TIPO_OPTIONS = [
-  { value: 'anodizado', label: 'Anodizado', color: '#E3F2FD', textColor: '#1565C0', icon: <ColorLensIcon sx={{ fontSize: 14 }} /> },
-  { value: 'pintura', label: 'Pintura', color: '#FFF3E0', textColor: '#E65100', icon: <PaletteIcon sx={{ fontSize: 14 }} /> },
-  { value: 'mill_finish', label: 'Mill Finish', color: '#E8F5E9', textColor: '#2E7D32', icon: <OpacityIcon sx={{ fontSize: 14 }} /> },
-  { value: 'sublimado', label: 'Sublimado', color: '#F3E5F5', textColor: '#7B1FA2', icon: <TextureIcon sx={{ fontSize: 14 }} /> },
-  { value: 'otro', label: 'Otro', color: '#ECEFF1', textColor: '#546E7A', icon: <HelpOutlineIcon sx={{ fontSize: 14 }} /> },
-];
+const TRANSITION_DURATION = 250;
 
 const ENRICHMENT_COLORS = {
   pendiente: { bg: '#FFEBEE', color: '#C62828', label: 'Pendiente' },
@@ -60,21 +45,10 @@ const ENRICHMENT_COLORS = {
   completo: { bg: '#E8F5E9', color: '#2E7D32', label: 'Completo' },
 };
 
-const STATUS_OPTIONS = [
-  { value: 'active', label: 'Activo', color: '#E8F5E9', textColor: '#2E7D32' },
-  { value: 'inactive', label: 'Inactivo', color: '#FFEBEE', textColor: '#C62828' },
-  { value: 'descontinuado', label: 'Descontinuado', color: '#FFEBEE', textColor: '#C62828' },
-];
-
-function getTipoStyle(tipo) {
-  return TIPO_OPTIONS.find((t) => t.value === tipo) || { label: tipo || 'Sin tipo', color: '#ECEFF1', textColor: '#9E9E9E' };
-}
-
-const TRANSITION_DURATION = 250;
-
 // ══════════════════════════════════════════════════════════════
 // Shared Components
 // ══════════════════════════════════════════════════════════════
+
 function TbIcon({ title, disabled, onClick, color, children }) {
   return (
     <Tooltip title={title} arrow>
@@ -88,7 +62,6 @@ function TbIcon({ title, disabled, onClick, color, children }) {
   );
 }
 
-/** Clickable filter chip — toggles on/off with color feedback */
 function FilterChip({ label, active, onClick, activeColor, activeTextColor, icon, size = 'small' }) {
   return (
     <Chip
@@ -98,19 +71,12 @@ function FilterChip({ label, active, onClick, activeColor, activeTextColor, icon
       onClick={onClick}
       variant={active ? 'filled' : 'outlined'}
       sx={{
-        fontWeight: 600,
-        fontSize: '0.7rem',
-        height: 28,
-        cursor: 'pointer',
+        fontWeight: 600, fontSize: '0.7rem', height: 28, cursor: 'pointer',
         transition: 'all 0.2s ease',
         bgcolor: active ? (activeColor || 'primary.main') : 'transparent',
         color: active ? (activeTextColor || '#fff') : 'text.secondary',
         borderColor: active ? 'transparent' : 'divider',
-        '&:hover': {
-          transform: 'translateY(-1px)',
-          boxShadow: 1,
-          bgcolor: active ? (activeColor || 'primary.main') : 'action.hover',
-        },
+        '&:hover': { transform: 'translateY(-1px)', boxShadow: 1, bgcolor: active ? (activeColor || 'primary.main') : 'action.hover' },
       }}
     />
   );
@@ -122,10 +88,7 @@ function KpiCard({ value, label, color, bgColor, icon, delay = 0, loading }) {
       <Paper variant="outlined" sx={{ px: 2, py: 1.5, borderRadius: 1.5, minWidth: 110, flex: 1 }}>
         <Stack direction="row" alignItems="center" spacing={1}>
           <Skeleton variant="circular" width={32} height={32} />
-          <Box>
-            <Skeleton width={30} height={28} />
-            <Skeleton width={70} height={14} />
-          </Box>
+          <Box><Skeleton width={30} height={28} /><Skeleton width={70} height={14} /></Box>
         </Stack>
       </Paper>
     );
@@ -142,19 +105,11 @@ function KpiCard({ value, label, color, bgColor, icon, delay = 0, loading }) {
         <Box sx={{
           width: 36, height: 36, borderRadius: 1.5,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          bgcolor: bgColor || '#F1F5F9',
-          color: color || '#64748B',
-          flexShrink: 0,
-        }}>
-          {icon}
-        </Box>
+          bgcolor: bgColor || '#F1F5F9', color: color || '#64748B', flexShrink: 0,
+        }}>{icon}</Box>
         <Box>
-          <Typography variant="h5" fontWeight={800} color={color || 'text.primary'} sx={{ lineHeight: 1.1 }}>
-            {value}
-          </Typography>
-          <Typography variant="caption" color="text.secondary" fontWeight={600} sx={{ textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            {label}
-          </Typography>
+          <Typography variant="h5" fontWeight={800} color={color || 'text.primary'} sx={{ lineHeight: 1.1 }}>{value}</Typography>
+          <Typography variant="caption" color="text.secondary" fontWeight={600} sx={{ textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</Typography>
         </Box>
       </Paper>
     </Fade>
@@ -168,14 +123,9 @@ function TableSkeleton() {
         <Fade in timeout={200 + i * 80} key={i}>
           <Box sx={{ display: 'flex', gap: 2, py: 1, px: 1 }}>
             <Skeleton variant="rectangular" width={24} height={24} sx={{ borderRadius: 0.5 }} />
-            <Skeleton width={80} height={24} />
-            <Skeleton width={160} height={24} />
-            <Skeleton width={120} height={24} />
-            <Skeleton width={90} height={24} />
-            <Skeleton width={80} height={24} />
+            <Skeleton width={80} height={24} /><Skeleton width={160} height={24} />
+            <Skeleton width={120} height={24} /><Skeleton width={90} height={24} />
             <Skeleton width={60} height={24} />
-            <Skeleton width={70} height={24} />
-            <Skeleton width={90} height={24} />
           </Box>
         </Fade>
       ))}
@@ -186,40 +136,67 @@ function TableSkeleton() {
 // ══════════════════════════════════════════════════════════════
 // Create Modal
 // ══════════════════════════════════════════════════════════════
-function CreateModal({ open, onClose, onSave, saving }) {
-  const [form, setForm] = useState({
-    codigo: '', nombreSiesa: '', nombre: '', familia: '',
-    tipoAcabado: '', colorBase: '', descripcion: '', notas: '',
-  });
+function CreateModal({ open, onClose, onSave, saving, config, dimension, productType }) {
+  const [form, setForm] = useState({ codigo: '', nombreSiesa: '', nombre: '', descripcion: '', notas: '' });
+  const [extraFields, setExtraFields] = useState({});
+
+  useEffect(() => {
+    if (open) {
+      setForm({ codigo: '', nombreSiesa: '', nombre: '', descripcion: '', notas: '' });
+      const extra = {};
+      (config.formFields || []).forEach((f) => { extra[f.key] = ''; });
+      setExtraFields(extra);
+    }
+  }, [open, config]);
 
   const set = (f) => (e) => setForm((p) => ({ ...p, [f]: e.target.value }));
+  const setExtra = (f) => (e) => setExtraFields((p) => ({ ...p, [f]: e.target.value }));
 
   const handleSave = () => {
-    onSave(form);
-    setForm({ codigo: '', nombreSiesa: '', nombre: '', familia: '', tipoAcabado: '', colorBase: '', descripcion: '', notas: '' });
+    const payload = {
+      productType,
+      codigo: form.codigo,
+      nombreSiesa: form.nombreSiesa,
+      nombre: form.nombre || undefined,
+      descripcion: form.descripcion || undefined,
+      notas: form.notas || undefined,
+    };
+    // For acabado mode, extra fields go at top level; for generic, into metadata
+    if (config.mode === 'acabado') {
+      Object.entries(extraFields).forEach(([k, v]) => { if (v) payload[k] = v; });
+    } else {
+      payload.metadata = {};
+      Object.entries(extraFields).forEach(([k, v]) => { if (v) payload.metadata[k] = v; });
+    }
+    onSave(payload);
   };
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ fontWeight: 700 }}>Crear Acabado</DialogTitle>
+      <DialogTitle sx={{ fontWeight: 700 }}>Crear {config.labelSingular}</DialogTitle>
       <DialogContent>
         <Box sx={{ pt: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
           <Stack direction="row" spacing={2}>
-            <TextField label="Codigo *" value={form.codigo} onChange={set('codigo')} fullWidth />
+            <TextField label="Codigo *" value={form.codigo} onChange={set('codigo')} fullWidth
+              onFocus={(e) => e.target.select()} />
             <TextField label="Nombre Siesa *" value={form.nombreSiesa} onChange={set('nombreSiesa')} fullWidth />
           </Stack>
-          <TextField label="Nombre Normalizado" value={form.nombre} onChange={set('nombre')} helperText="Si esta vacio, se usa el nombre Siesa" />
-          <Stack direction="row" spacing={2}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Tipo Acabado</InputLabel>
-              <Select value={form.tipoAcabado} onChange={set('tipoAcabado')} label="Tipo Acabado">
-                <MenuItem value="">— Sin tipo —</MenuItem>
-                {TIPO_OPTIONS.map((t) => <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>)}
-              </Select>
-            </FormControl>
-            <TextField label="Familia" value={form.familia} onChange={set('familia')} fullWidth size="small" />
-          </Stack>
-          <TextField label="Color Base" value={form.colorBase} onChange={set('colorBase')} size="small" />
+          <TextField label="Nombre Normalizado" value={form.nombre} onChange={set('nombre')}
+            helperText="Si esta vacio, se usa el nombre Siesa" />
+          {(config.formFields || []).map((f) => (
+            f.type === 'select' ? (
+              <FormControl key={f.key} fullWidth size="small">
+                <InputLabel>{f.label}</InputLabel>
+                <Select value={extraFields[f.key] || ''} onChange={setExtra(f.key)} label={f.label}>
+                  <MenuItem value="">— Ninguno —</MenuItem>
+                  {(f.options || []).map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
+                </Select>
+              </FormControl>
+            ) : (
+              <TextField key={f.key} label={f.label} value={extraFields[f.key] || ''}
+                onChange={setExtra(f.key)} fullWidth size="small" />
+            )
+          ))}
           <TextField label="Descripcion" value={form.descripcion} onChange={set('descripcion')} multiline rows={2} />
           <TextField label="Notas" value={form.notas} onChange={set('notas')} multiline rows={2} />
         </Box>
@@ -237,7 +214,7 @@ function CreateModal({ open, onClose, onSave, saving }) {
 // ══════════════════════════════════════════════════════════════
 // Detail / Edit Modal
 // ══════════════════════════════════════════════════════════════
-function DetailModal({ open, onClose, item, onSave, saving }) {
+function DetailModal({ open, onClose, item, onSave, saving, config, dimension }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({});
   const [fullItem, setFullItem] = useState(null);
@@ -246,27 +223,32 @@ function DetailModal({ open, onClose, item, onSave, saving }) {
   useEffect(() => {
     if (item?.id && open) {
       setLoadingDetail(true);
-      productsApi.getAcabadoById(item.id)
+      const fetcher = config.mode === 'acabado'
+        ? productsApi.getAcabadoById(item.id)
+        : productsApi.getAttributeById(dimension, item.id);
+      fetcher
         .then((data) => setFullItem(data))
         .catch(() => setFullItem(item))
         .finally(() => setLoadingDetail(false));
     }
-  }, [item, open]);
+  }, [item, open, config.mode, dimension]);
 
   useEffect(() => {
     const src = fullItem || item;
     if (src) {
-      setForm({
+      const f = {
         nombre: src.nombre || '',
-        familia: src.familia || '',
-        tipoAcabado: src.tipoAcabado || '',
-        colorBase: src.colorBase || '',
         descripcion: src.descripcion || '',
         notas: src.notas || '',
+      };
+      // Add extra fields from config
+      (config.formFields || []).forEach((ff) => {
+        f[ff.key] = src[ff.key] || (src.metadata || {})[ff.key] || '';
       });
+      setForm(f);
       setEditing(false);
     }
-  }, [fullItem, item]);
+  }, [fullItem, item, config]);
 
   if (!item) return null;
   const src = fullItem || item;
@@ -276,23 +258,35 @@ function DetailModal({ open, onClose, item, onSave, saving }) {
   const handleSave = () => {
     const changes = {};
     if (form.nombre !== (src.nombre || '')) changes.nombre = form.nombre;
-    if (form.familia !== (src.familia || '')) changes.familia = form.familia;
-    if (form.tipoAcabado !== (src.tipoAcabado || '')) changes.tipoAcabado = form.tipoAcabado;
-    if (form.colorBase !== (src.colorBase || '')) changes.colorBase = form.colorBase;
     if (form.descripcion !== (src.descripcion || '')) changes.descripcion = form.descripcion;
     if (form.notas !== (src.notas || '')) changes.notas = form.notas;
+
+    if (config.mode === 'acabado') {
+      (config.formFields || []).forEach((f) => {
+        if (form[f.key] !== (src[f.key] || '')) changes[f.key] = form[f.key];
+      });
+    } else {
+      const metaChanges = {};
+      (config.formFields || []).forEach((f) => {
+        const srcVal = (src.metadata || {})[f.key] || '';
+        if (form[f.key] !== srcVal) metaChanges[f.key] = form[f.key];
+      });
+      if (Object.keys(metaChanges).length > 0) {
+        changes.metadata = { ...(src.metadata || {}), ...metaChanges };
+      }
+    }
+
     if (Object.keys(changes).length > 0) onSave(src.id, changes);
     setEditing(false);
   };
 
-  const tipoStyle = getTipoStyle(src.tipoAcabado);
   const enrStyle = ENRICHMENT_COLORS[src.enrichmentStatus] || ENRICHMENT_COLORS.pendiente;
   const changelog = src.changeLog?.length > 0 ? src.changeLog : [{ date: src.updatedAt, action: 'Creado desde importacion' }];
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Typography variant="h6" fontWeight={700}>Detalle de Acabado</Typography>
+        <Typography variant="h6" fontWeight={700}>Detalle de {config.labelSingular}</Typography>
         <IconButton onClick={onClose} size="small"><CloseIcon /></IconButton>
       </DialogTitle>
       <DialogContent>
@@ -301,7 +295,6 @@ function DetailModal({ open, onClose, item, onSave, saving }) {
         ) : (
           <>
             <Grid container spacing={2} sx={{ mb: 3 }}>
-              {/* Row 1: Code + Status + Enrichment */}
               <Grid item xs={4}>
                 <Typography variant="caption" color="text.secondary">Codigo</Typography>
                 <Box sx={{ mt: 0.5 }}>
@@ -311,42 +304,19 @@ function DetailModal({ open, onClose, item, onSave, saving }) {
               <Grid item xs={4}>
                 <Typography variant="caption" color="text.secondary">Estado</Typography>
                 <Box sx={{ mt: 0.5 }}>
-                  <Chip label={src.status === 'active' ? 'Activo' : src.status === 'descontinuado' ? 'Descontinuado' : 'Inactivo'}
-                    size="small" sx={{ bgcolor: src.status === 'active' ? '#E8F5E9' : '#FFEBEE', color: src.status === 'active' ? '#2E7D32' : '#C62828', fontWeight: 600 }} />
+                  <Chip label={src.status === 'active' ? 'Activo' : 'Inactivo'} size="small"
+                    sx={{ bgcolor: src.status === 'active' ? '#E8F5E9' : '#FFEBEE', color: src.status === 'active' ? '#2E7D32' : '#C62828', fontWeight: 600 }} />
                 </Box>
               </Grid>
               <Grid item xs={4}>
                 <Typography variant="caption" color="text.secondary">Enriquecimiento</Typography>
                 <Box sx={{ mt: 0.5 }}>
-                  <Chip label={src.enrichmentStatus} size="small" sx={{ bgcolor: enrStyle.bg, color: enrStyle.color, fontWeight: 600, textTransform: 'capitalize' }} />
+                  <Chip label={enrStyle.label} size="small" sx={{ bgcolor: enrStyle.bg, color: enrStyle.color, fontWeight: 600 }} />
                 </Box>
               </Grid>
-
-              {/* Row 2: SKUs + Tipo + Color */}
-              <Grid item xs={3}>
+              <Grid item xs={4}>
                 <Typography variant="caption" color="text.secondary">SKUs</Typography>
                 <Typography variant="body2" fontWeight={600}>{src.skuCount}</Typography>
-              </Grid>
-              <Grid item xs={5}>
-                <Typography variant="caption" color="text.secondary">Tipo Acabado</Typography>
-                {editing ? (
-                  <Select fullWidth size="small" value={form.tipoAcabado} onChange={set('tipoAcabado')} sx={{ mt: 0.5 }}>
-                    <MenuItem value="">— Sin tipo —</MenuItem>
-                    {TIPO_OPTIONS.map((t) => <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>)}
-                  </Select>
-                ) : (
-                  <Box sx={{ mt: 0.5 }}>
-                    <Chip label={tipoStyle.label} size="small" sx={{ bgcolor: tipoStyle.color, color: tipoStyle.textColor, fontWeight: 600 }} />
-                  </Box>
-                )}
-              </Grid>
-              <Grid item xs={4}>
-                <Typography variant="caption" color="text.secondary">Color Base</Typography>
-                {editing ? (
-                  <TextField fullWidth size="small" value={form.colorBase} onChange={set('colorBase')} sx={{ mt: 0.5 }} />
-                ) : (
-                  <Typography variant="body2" fontWeight={500} sx={{ mt: 0.5 }}>{src.colorBase || '—'}</Typography>
-                )}
               </Grid>
 
               {/* Nombre Siesa (read-only) */}
@@ -367,15 +337,27 @@ function DetailModal({ open, onClose, item, onSave, saving }) {
                 )}
               </Grid>
 
-              {/* Familia */}
-              <Grid item xs={12}>
-                <Typography variant="caption" color="text.secondary">Familia</Typography>
-                {editing ? (
-                  <TextField fullWidth size="small" value={form.familia} onChange={set('familia')} sx={{ mt: 0.5 }} />
-                ) : (
-                  <Typography variant="body2" sx={{ mt: 0.5 }}>{src.familia || '—'}</Typography>
-                )}
-              </Grid>
+              {/* Extra config fields */}
+              {(config.formFields || []).map((f) => (
+                <Grid item xs={6} key={f.key}>
+                  <Typography variant="caption" color="text.secondary">{f.label}</Typography>
+                  {editing ? (
+                    f.type === 'select' ? (
+                      <Select fullWidth size="small" value={form[f.key] || ''} onChange={set(f.key)} sx={{ mt: 0.5 }}>
+                        <MenuItem value="">— Ninguno —</MenuItem>
+                        {(f.options || []).map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
+                      </Select>
+                    ) : (
+                      <TextField fullWidth size="small" value={form[f.key] || ''} onChange={set(f.key)} sx={{ mt: 0.5 }} />
+                    )
+                  ) : (
+                    <Typography variant="body2" fontWeight={500} sx={{ mt: 0.5 }}>
+                      {(f.type === 'select' ? (f.options || []).find((o) => o.value === (src[f.key] || (src.metadata || {})[f.key]))?.label : null)
+                        || src[f.key] || (src.metadata || {})[f.key] || '—'}
+                    </Typography>
+                  )}
+                </Grid>
+              ))}
 
               {/* Descripcion */}
               <Grid item xs={12}>
@@ -396,18 +378,6 @@ function DetailModal({ open, onClose, item, onSave, saving }) {
                   <Typography variant="body2" sx={{ mt: 0.5 }}>{src.notas || '—'}</Typography>
                 )}
               </Grid>
-
-              {/* Subcategorias */}
-              {src.subcategorias?.length > 0 && (
-                <Grid item xs={12}>
-                  <Typography variant="caption" color="text.secondary">Subcategorias asociadas</Typography>
-                  <Stack direction="row" spacing={0.5} flexWrap="wrap" sx={{ mt: 0.5, gap: 0.5 }}>
-                    {src.subcategorias.map((s) => (
-                      <Chip key={s} label={s} size="small" variant="outlined" sx={{ fontSize: '0.7rem' }} />
-                    ))}
-                  </Stack>
-                </Grid>
-              )}
 
               <Grid item xs={6}>
                 <Typography variant="caption" color="text.secondary">Ultima modificacion</Typography>
@@ -458,18 +428,18 @@ function DetailModal({ open, onClose, item, onSave, saving }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// Rename / Bulk Tipo Dialogs
+// Dialogs
 // ══════════════════════════════════════════════════════════════
-function RenameDialog({ open, onClose, onConfirm, selectedItems, saving }) {
+function RenameDialog({ open, onClose, onConfirm, selectedItems, saving, config }) {
   const [newValue, setNewValue] = useState('');
   useEffect(() => { if (open) setNewValue(''); }, [open]);
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ fontWeight: 700 }}>Renombrar Acabados</DialogTitle>
+      <DialogTitle sx={{ fontWeight: 700 }}>Renombrar {config.label}</DialogTitle>
       <DialogContent>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Se actualizara el nombre de {selectedItems.length} acabado(s):
+          Se actualizara el nombre de {selectedItems.length} {config.labelSingular.toLowerCase()}(s):
         </Typography>
         <Box sx={{ mb: 2, maxHeight: 120, overflow: 'auto' }}>
           {selectedItems.map((item, i) => (
@@ -485,34 +455,6 @@ function RenameDialog({ open, onClose, onConfirm, selectedItems, saving }) {
         <Button onClick={onClose} disabled={saving}>Cancelar</Button>
         <Button variant="contained" onClick={() => onConfirm(newValue)} disabled={!newValue.trim() || saving}>
           {saving ? 'Renombrando...' : 'Renombrar'}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
-function BulkTipoDialog({ open, onClose, onConfirm, count, saving }) {
-  const [tipo, setTipo] = useState('');
-  useEffect(() => { if (open) setTipo(''); }, [open]);
-
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
-      <DialogTitle sx={{ fontWeight: 700 }}>Asignar Tipo</DialogTitle>
-      <DialogContent>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Asignar tipo a {count} acabado(s):
-        </Typography>
-        <FormControl fullWidth>
-          <InputLabel>Tipo Acabado</InputLabel>
-          <Select value={tipo} onChange={(e) => setTipo(e.target.value)} label="Tipo Acabado">
-            {TIPO_OPTIONS.map((t) => <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>)}
-          </Select>
-        </FormControl>
-      </DialogContent>
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={onClose} disabled={saving}>Cancelar</Button>
-        <Button variant="contained" onClick={() => onConfirm(tipo)} disabled={!tipo || saving}>
-          {saving ? 'Asignando...' : 'Asignar'}
         </Button>
       </DialogActions>
     </Dialog>
@@ -537,33 +479,32 @@ function ConfirmDialog({ open, onClose, onConfirm, title, message, confirmLabel,
 // ══════════════════════════════════════════════════════════════
 // CSV Export
 // ══════════════════════════════════════════════════════════════
-function downloadCSV(items, filename) {
+function downloadCSV(items, filename, config) {
   if (!items?.length) return;
-  const headers = ['Codigo', 'Nombre Siesa', 'Nombre', 'Tipo', 'Familia', 'Color', 'SKUs', 'Estado', 'Enriquecimiento', 'Subcategorias'];
+  const baseHeaders = ['Codigo', 'Nombre Siesa', 'Nombre', 'SKUs', 'Estado', 'Enriquecimiento'];
+  const extraHeaders = config.csvExtraHeaders || [];
+  const headers = [...baseHeaders, ...extraHeaders];
   const csvRows = [headers.join(',')];
   for (const r of items) {
-    csvRows.push([
+    const baseCols = [
       r.codigo, `"${(r.nombreSiesa || '').replace(/"/g, '""')}"`,
       `"${(r.nombre || '').replace(/"/g, '""')}"`,
-      r.tipoAcabado || '', r.familia || '', r.colorBase || '',
       r.skuCount, r.status, r.enrichmentStatus,
-      `"${(r.subcategorias || []).join('; ')}"`,
-    ].join(','));
+    ];
+    const extraCols = config.csvExtraFields ? config.csvExtraFields(r) : [];
+    csvRows.push([...baseCols, ...extraCols].join(','));
   }
   const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename; a.click();
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
   URL.revokeObjectURL(url);
 }
 
 // ══════════════════════════════════════════════════════════════
 // Mobile Card
 // ══════════════════════════════════════════════════════════════
-function AcabadoCard({ item, selected, onToggle, onView }) {
-  const tipoStyle = getTipoStyle(item.tipoAcabado);
+function AttributeCard({ item, selected, onToggle, onView, config }) {
   const enrStyle = ENRICHMENT_COLORS[item.enrichmentStatus] || ENRICHMENT_COLORS.pendiente;
-
   return (
     <Card variant="outlined" sx={{ mb: 1, borderRadius: 2, borderColor: selected ? 'primary.main' : 'divider', borderWidth: selected ? 2 : 1, opacity: item.status === 'active' ? 1 : 0.6 }}>
       <CardActionArea onClick={onView} sx={{ p: 0 }}>
@@ -578,10 +519,8 @@ function AcabadoCard({ item, selected, onToggle, onView }) {
                 <Chip label={item.codigo} size="small" variant="outlined" sx={{ height: 20, fontSize: '0.65rem', fontWeight: 700, fontFamily: 'monospace' }} />
               </Stack>
               <Stack direction="row" spacing={0.5} flexWrap="wrap" sx={{ gap: 0.5 }}>
-                <Chip label={tipoStyle.label} size="small" sx={{ height: 20, fontSize: '0.6rem', fontWeight: 600, bgcolor: tipoStyle.color, color: tipoStyle.textColor }} />
                 <Chip label={`${item.skuCount} SKUs`} size="small" variant="outlined" sx={{ height: 20, fontSize: '0.65rem', fontWeight: 600 }} />
-                <Chip label={item.enrichmentStatus} size="small" sx={{ height: 20, fontSize: '0.6rem', fontWeight: 600, bgcolor: enrStyle.bg, color: enrStyle.color, textTransform: 'capitalize' }} />
-                {item.notas && <Chip icon={<NotesIcon sx={{ fontSize: 12 }} />} label="Notas" size="small" sx={{ height: 20, fontSize: '0.6rem', fontWeight: 600, bgcolor: '#F3E5F5', color: '#7B1FA2' }} />}
+                <Chip label={enrStyle.label} size="small" sx={{ height: 20, fontSize: '0.6rem', fontWeight: 600, bgcolor: enrStyle.bg, color: enrStyle.color }} />
               </Stack>
             </Box>
           </Stack>
@@ -594,7 +533,7 @@ function AcabadoCard({ item, selected, onToggle, onView }) {
 // ══════════════════════════════════════════════════════════════
 // Main Component
 // ══════════════════════════════════════════════════════════════
-export default function AcabadosTab() {
+export default function AttributeManager({ dimension, productType, config }) {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
@@ -608,25 +547,37 @@ export default function AcabadosTab() {
   const [paginationModel, setPaginationModel] = useState({ page: 0, pageSize: 25 });
 
   // Filters
-  const [filterTipo, setFilterTipo] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [filterEnrichment, setFilterEnrichment] = useState('');
-  const [filterSubcat, setFilterSubcat] = useState('');
-  const [filterOptions, setFilterOptions] = useState({ tipos: [], familias: [], colores: [], subcategorias: [] });
+  const [extraFilters, setExtraFilters] = useState({});
 
   // Dialogs
   const [createOpen, setCreateOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailItem, setDetailItem] = useState(null);
   const [renameOpen, setRenameOpen] = useState(false);
-  const [bulkTipoOpen, setBulkTipoOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState(null);
 
-  // Load filter options once
-  useEffect(() => {
-    productsApi.getAcabadoFilters().then(setFilterOptions).catch(() => {});
-  }, []);
+  // Build API adapter based on mode
+  const api = useMemo(() => {
+    if (config.mode === 'acabado') {
+      return {
+        list: (params) => productsApi.getAcabados(params),
+        getById: (id) => productsApi.getAcabadoById(id),
+        create: (data) => productsApi.createAcabado(data),
+        update: (id, data) => productsApi.updateAcabado(id, data),
+        bulk: (data) => productsApi.bulkAcabadoAction(data),
+      };
+    }
+    return {
+      list: (params) => productsApi.getAttributes(dimension, { ...params, product_type: productType }),
+      getById: (id) => productsApi.getAttributeById(dimension, id),
+      create: (data) => productsApi.createAttribute(dimension, data),
+      update: (id, data) => productsApi.updateAttribute(dimension, id, data),
+      bulk: (data) => productsApi.bulkAttributeAction(dimension, data),
+    };
+  }, [config.mode, dimension, productType]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -634,72 +585,73 @@ export default function AcabadosTab() {
     try {
       const params = {};
       if (search) params.search = search;
-      if (filterTipo) params.tipo_acabado = filterTipo;
       if (filterStatus) params.status = filterStatus;
       if (filterEnrichment) params.enrichment = filterEnrichment;
-      if (filterSubcat) params.subcategoria = filterSubcat;
-      const data = await productsApi.getAcabados(params);
+      // Extra filters (e.g., tipo_acabado for acabados)
+      Object.entries(extraFilters).forEach(([k, v]) => { if (v) params[k] = v; });
+
+      const data = await api.list(params);
       setRows(data.items || []);
       setStats(data.stats || {});
     } catch (err) {
-      console.error('Error fetching acabados:', err);
+      console.error(`Error fetching ${dimension}:`, err);
       setRows([]);
     } finally {
       setLoading(false);
     }
-  }, [search, filterTipo, filterStatus, filterEnrichment, filterSubcat]);
+  }, [search, filterStatus, filterEnrichment, extraFilters, api, dimension]);
 
   useEffect(() => {
     const t = setTimeout(fetchData, search ? 300 : 0);
     return () => clearTimeout(t);
   }, [fetchData]);
 
+  // Reset state when dimension/productType changes
+  useEffect(() => {
+    setSearch('');
+    setFilterStatus('');
+    setFilterEnrichment('');
+    setExtraFilters({});
+    setSelectionModel([]);
+    setPaginationModel({ page: 0, pageSize: 25 });
+  }, [dimension, productType]);
+
   useEffect(() => {
     if (snackMsg) { const t = setTimeout(() => setSnackMsg(''), 4000); return () => clearTimeout(t); }
   }, [snackMsg]);
 
-  // CRUD
+  // CRUD handlers
   const handleCreate = useCallback(async (form) => {
     setSaving(true);
     try {
-      await productsApi.createAcabado(form);
+      await api.create(form);
       setCreateOpen(false);
-      setSnackMsg('Acabado creado exitosamente');
+      setSnackMsg(`${config.labelSingular} creado exitosamente`);
       fetchData();
     } catch (err) { console.error(err); } finally { setSaving(false); }
-  }, [fetchData]);
+  }, [api, fetchData, config.labelSingular]);
 
   const handleViewDetail = useCallback((item) => { setDetailItem(item); setDetailOpen(true); }, []);
 
   const handleDetailSave = useCallback(async (id, changes) => {
     setSaving(true);
     try {
-      await productsApi.updateAcabado(id, changes);
-      setSnackMsg('Acabado actualizado');
+      await api.update(id, changes);
+      setSnackMsg(`${config.labelSingular} actualizado`);
       fetchData();
       setDetailOpen(false);
       setDetailItem(null);
     } catch (err) { console.error(err); } finally { setSaving(false); }
-  }, [fetchData]);
+  }, [api, fetchData, config.labelSingular]);
 
   const getSelectedItems = useCallback(() => rows.filter((r) => selectionModel.includes(r.id)), [rows, selectionModel]);
 
   const handleBulkRename = async (newValue) => {
     setSaving(true);
     try {
-      await productsApi.bulkAcabadoAction({ action: 'rename', ids: selectionModel, newValue });
+      await api.bulk({ action: 'rename', ids: selectionModel, newValue });
       setSelectionModel([]); setRenameOpen(false);
-      setSnackMsg(`${selectionModel.length} acabado(s) renombrado(s)`);
-      fetchData();
-    } catch (err) { console.error(err); } finally { setSaving(false); }
-  };
-
-  const handleBulkTipo = async (tipo) => {
-    setSaving(true);
-    try {
-      await productsApi.bulkAcabadoAction({ action: 'set_tipo', ids: selectionModel, newValue: tipo });
-      setSelectionModel([]); setBulkTipoOpen(false);
-      setSnackMsg(`Tipo asignado a ${selectionModel.length} acabado(s)`);
+      setSnackMsg(`${selectionModel.length} ${config.labelSingular.toLowerCase()}(s) renombrado(s)`);
       fetchData();
     } catch (err) { console.error(err); } finally { setSaving(false); }
   };
@@ -707,118 +659,122 @@ export default function AcabadosTab() {
   const handleBulkConfirm = async () => {
     setSaving(true);
     try {
-      await productsApi.bulkAcabadoAction({ action: confirmAction, ids: selectionModel });
+      await api.bulk({ action: confirmAction, ids: selectionModel });
       setSelectionModel([]); setConfirmOpen(false);
-      setSnackMsg(`${selectionModel.length} acabado(s) ${confirmAction === 'delete' ? 'eliminado(s)' : confirmAction === 'activate' ? 'activado(s)' : 'inactivado(s)'}`);
+      setSnackMsg(`${selectionModel.length} ${config.labelSingular.toLowerCase()}(s) ${confirmAction === 'delete' ? 'eliminado(s)' : confirmAction === 'activate' ? 'activado(s)' : 'inactivado(s)'}`);
       fetchData();
     } catch (err) { console.error(err); } finally { setSaving(false); setConfirmAction(null); }
   };
 
   const handleExport = (items) => {
-    downloadCSV(items, `acabados_${new Date().toISOString().slice(0, 10)}.csv`);
+    downloadCSV(items, `${dimension}_${new Date().toISOString().slice(0, 10)}.csv`, config);
     setSnackMsg('Exportacion completada');
   };
 
   const hasActiveSelected = useMemo(() => rows.some((r) => selectionModel.includes(r.id) && r.status === 'active'), [rows, selectionModel]);
   const hasInactiveSelected = useMemo(() => rows.some((r) => selectionModel.includes(r.id) && r.status !== 'active'), [rows, selectionModel]);
   const hasSel = selectionModel.length > 0;
-  const activeFilters = [filterTipo, filterStatus, filterEnrichment, filterSubcat].filter(Boolean).length;
+  const activeFilters = [filterStatus, filterEnrichment, ...Object.values(extraFilters)].filter(Boolean).length;
 
-  // ── Columns ──
-  const columns = useMemo(() => [
-    {
-      field: 'codigo', headerName: 'Codigo', flex: 0.8, minWidth: 90, align: 'center', headerAlign: 'center',
-      renderCell: (p) => <Chip label={p.value} size="small" color="primary" variant="outlined" sx={{ fontWeight: 700, fontFamily: 'monospace', fontSize: '0.75rem' }} />,
-    },
-    {
-      field: 'nombre', headerName: 'Nombre', flex: 1.6, minWidth: 140, align: 'center', headerAlign: 'center',
-      valueGetter: (value, row) => value || row.nombreSiesa,
-      renderCell: (p) => <Typography variant="body2" fontWeight={600}>{p.value}</Typography>,
-    },
-    {
-      field: 'nombreSiesa', headerName: 'Nombre Siesa', flex: 1.2, minWidth: 120, align: 'center', headerAlign: 'center',
-      renderCell: (p) => <Typography variant="caption" sx={{ fontFamily: 'monospace', color: 'text.secondary' }}>{p.value}</Typography>,
-    },
-    {
-      field: 'tipoAcabado', headerName: 'Tipo', flex: 1, minWidth: 100, align: 'center', headerAlign: 'center',
-      renderCell: (p) => {
-        const s = getTipoStyle(p.value);
-        return <Chip label={s.label} size="small" sx={{ bgcolor: s.color, color: s.textColor, fontWeight: 600, fontSize: '0.7rem' }} />;
+  // Columns
+  const columns = useMemo(() => {
+    const base = [
+      {
+        field: 'codigo', headerName: 'Codigo', flex: 0.8, minWidth: 90, align: 'center', headerAlign: 'center',
+        renderCell: (p) => <Chip label={p.value} size="small" color="primary" variant="outlined" sx={{ fontWeight: 700, fontFamily: 'monospace', fontSize: '0.75rem' }} />,
       },
-    },
-    { field: 'familia', headerName: 'Familia', flex: 1, minWidth: 100, align: 'center', headerAlign: 'center' },
-    { field: 'colorBase', headerName: 'Color', flex: 0.7, minWidth: 80, align: 'center', headerAlign: 'center' },
-    {
-      field: 'skuCount', headerName: 'SKUs', flex: 0.6, minWidth: 70, align: 'center', headerAlign: 'center',
-      renderCell: (p) => <Chip label={p.value} size="small" variant="outlined" color={p.value > 0 ? 'primary' : 'default'} sx={{ fontWeight: 600, minWidth: 40 }} />,
-    },
-    {
-      field: 'status', headerName: 'Estado', flex: 0.8, minWidth: 85, align: 'center', headerAlign: 'center',
-      renderCell: (p) => (
-        <Chip label={p.value === 'active' ? 'Activo' : p.value === 'descontinuado' ? 'Desc.' : 'Inactivo'} size="small"
-          sx={{ bgcolor: p.value === 'active' ? '#E8F5E9' : '#FFEBEE', color: p.value === 'active' ? '#2E7D32' : '#C62828', fontWeight: 600, fontSize: '0.7rem' }} />
-      ),
-    },
-    {
-      field: 'enrichmentStatus', headerName: 'Completitud', flex: 0.9, minWidth: 95, align: 'center', headerAlign: 'center',
-      renderCell: (p) => {
-        const s = ENRICHMENT_COLORS[p.value] || ENRICHMENT_COLORS.pendiente;
-        return <Chip label={s.label} size="small" sx={{ bgcolor: s.bg, color: s.color, fontWeight: 600, fontSize: '0.7rem' }} />;
+      {
+        field: 'nombre', headerName: 'Nombre', flex: 1.6, minWidth: 140, align: 'center', headerAlign: 'center',
+        valueGetter: (value, row) => value || row.nombreSiesa,
+        renderCell: (p) => <Typography variant="body2" fontWeight={600}>{p.value}</Typography>,
       },
-    },
-    {
-      field: 'updatedAt', headerName: 'Modificado', flex: 0.9, minWidth: 95, align: 'center', headerAlign: 'center',
-      valueFormatter: (value) => formatDate(value),
-    },
-  ], []);
+      {
+        field: 'nombreSiesa', headerName: 'Nombre Siesa', flex: 1.2, minWidth: 120, align: 'center', headerAlign: 'center',
+        renderCell: (p) => <Typography variant="caption" sx={{ fontFamily: 'monospace', color: 'text.secondary' }}>{p.value}</Typography>,
+      },
+    ];
+
+    // Insert extra columns from config
+    const extra = (config.extraColumns || []).map((col) => ({
+      ...col,
+      align: 'center',
+      headerAlign: 'center',
+      ...(col.chipField ? {
+        renderCell: (p) => {
+          const style = col.getStyle ? col.getStyle(p.value) : { label: p.value || '—', color: '#ECEFF1', textColor: '#9E9E9E' };
+          return <Chip label={style.label} size="small" sx={{ bgcolor: style.color, color: style.textColor, fontWeight: 600, fontSize: '0.7rem' }} />;
+        },
+      } : {}),
+    }));
+
+    const tail = [
+      {
+        field: 'skuCount', headerName: 'SKUs', flex: 0.6, minWidth: 70, align: 'center', headerAlign: 'center',
+        renderCell: (p) => <Chip label={p.value} size="small" variant="outlined" color={p.value > 0 ? 'primary' : 'default'} sx={{ fontWeight: 600, minWidth: 40 }} />,
+      },
+      {
+        field: 'status', headerName: 'Estado', flex: 0.8, minWidth: 85, align: 'center', headerAlign: 'center',
+        renderCell: (p) => (
+          <Chip label={p.value === 'active' ? 'Activo' : 'Inactivo'} size="small"
+            sx={{ bgcolor: p.value === 'active' ? '#E8F5E9' : '#FFEBEE', color: p.value === 'active' ? '#2E7D32' : '#C62828', fontWeight: 600, fontSize: '0.7rem' }} />
+        ),
+      },
+      {
+        field: 'enrichmentStatus', headerName: 'Completitud', flex: 0.9, minWidth: 95, align: 'center', headerAlign: 'center',
+        renderCell: (p) => {
+          const s = ENRICHMENT_COLORS[p.value] || ENRICHMENT_COLORS.pendiente;
+          return <Chip label={s.label} size="small" sx={{ bgcolor: s.bg, color: s.color, fontWeight: 600, fontSize: '0.7rem' }} />;
+        },
+      },
+      {
+        field: 'updatedAt', headerName: 'Modificado', flex: 0.9, minWidth: 95, align: 'center', headerAlign: 'center',
+        valueFormatter: (value) => formatDate(value),
+      },
+    ];
+
+    return [...base, ...extra, ...tail];
+  }, [config]);
 
   return (
     <Box>
-      {/* ── KPI Strip with staggered fade ── */}
+      {/* KPI Strip */}
       <Stack direction="row" spacing={1.5} sx={{ mb: 2, flexWrap: 'wrap', gap: 1 }}>
-        <KpiCard value={stats.total || 0} label="Total Acabados" loading={loading} delay={0}
-          color="#334155" bgColor="#F1F5F9" icon={<CategoryIcon sx={{ fontSize: 20 }} />} />
-        <KpiCard value={stats.anodizado || 0} label="Anodizado" loading={loading} delay={50}
-          color="#1565C0" bgColor="#E3F2FD" icon={<ColorLensIcon sx={{ fontSize: 20 }} />} />
-        <KpiCard value={stats.pintura || 0} label="Pintura" loading={loading} delay={100}
-          color="#E65100" bgColor="#FFF3E0" icon={<PaletteIcon sx={{ fontSize: 20 }} />} />
-        <KpiCard value={stats.millFinish || 0} label="Mill Finish" loading={loading} delay={150}
-          color="#2E7D32" bgColor="#E8F5E9" icon={<OpacityIcon sx={{ fontSize: 20 }} />} />
-        <KpiCard value={stats.sublimado || 0} label="Sublimado" loading={loading} delay={200}
-          color="#7B1FA2" bgColor="#F3E5F5" icon={<TextureIcon sx={{ fontSize: 20 }} />} />
-        <KpiCard value={stats.pendientes || 0} label="Sin Completar" loading={loading} delay={250}
-          color="#C62828" bgColor="#FFEBEE" icon={<PendingIcon sx={{ fontSize: 20 }} />} />
-        <KpiCard value={stats.completo || 0} label="Ficha Completa" loading={loading} delay={300}
-          color="#2E7D32" bgColor="#E8F5E9" icon={<TaskAltIcon sx={{ fontSize: 20 }} />} />
+        {(config.kpis || []).map((kpi, i) => (
+          <KpiCard
+            key={kpi.key}
+            value={stats[kpi.key] || 0}
+            label={kpi.label}
+            loading={loading}
+            delay={i * 50}
+            color={kpi.color}
+            bgColor={kpi.bgColor}
+            icon={<kpi.Icon sx={{ fontSize: 20 }} />}
+          />
+        ))}
       </Stack>
 
       <Collapse in={!!snackMsg}>
         <Alert severity="success" onClose={() => setSnackMsg('')} sx={{ mb: 2 }}>{snackMsg}</Alert>
       </Collapse>
 
-      {/* ══════════════════════════════════════════════════════════
-          Command Bar — Integrated search, filters, actions
-          Desktop: two rows (search+actions / filters)
-          Mobile: stacked with horizontally scrollable filters
-         ══════════════════════════════════════════════════════════ */}
+      {/* Command Bar */}
       <Fade in timeout={TRANSITION_DURATION}>
         <Paper variant="outlined" sx={{ mb: 2, borderRadius: 2, overflow: 'hidden' }}>
-          {/* Row 1: Search + Result count + Selection actions + Global actions */}
+          {/* Row 1: Search + actions */}
           <Box sx={{ px: 1.5, py: 0.75, display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
-            <TextField placeholder="Buscar acabado..." value={search} onChange={(e) => setSearch(e.target.value)} size="small"
+            <TextField placeholder={`Buscar ${config.labelSingular.toLowerCase()}...`} value={search}
+              onChange={(e) => setSearch(e.target.value)} size="small"
               sx={{ width: { xs: '100%', sm: 280 }, '& .MuiOutlinedInput-root': { height: 36 } }}
               InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment> }} />
 
-            {/* Result count */}
             <Fade in={!loading}>
               <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5, fontWeight: 500, whiteSpace: 'nowrap' }}>
-                {rows.length}{stats.total ? ` de ${stats.total}` : ''} {isMobile ? '' : 'acabados'}
+                {rows.length}{stats.total ? ` de ${stats.total}` : ''} {isMobile ? '' : config.label.toLowerCase()}
               </Typography>
             </Fade>
 
             <Box sx={{ flexGrow: 1 }} />
 
-            {/* Selection indicator */}
             {hasSel && (
               <Fade in>
                 <Chip label={`${selectionModel.length} sel.`} size="small" color="primary"
@@ -829,14 +785,12 @@ export default function AcabadosTab() {
             <Divider orientation="vertical" flexItem sx={{ mx: 0.5, display: { xs: 'none', sm: 'block' } }} />
 
             {/* Selection actions */}
-            <TbIcon title="Ver detalle" disabled={selectionModel.length !== 1} onClick={() => { const items = getSelectedItems(); if (items.length === 1) handleViewDetail(items[0]); }}>
+            <TbIcon title="Ver detalle" disabled={selectionModel.length !== 1}
+              onClick={() => { const items = getSelectedItems(); if (items.length === 1) handleViewDetail(items[0]); }}>
               <VisibilityOutlinedIcon fontSize="small" />
             </TbIcon>
             <TbIcon title="Renombrar" disabled={!hasSel} onClick={() => setRenameOpen(true)}>
               <DriveFileRenameOutlineIcon fontSize="small" />
-            </TbIcon>
-            <TbIcon title="Asignar tipo" disabled={!hasSel} onClick={() => setBulkTipoOpen(true)}>
-              <FormatPaintIcon fontSize="small" />
             </TbIcon>
             {hasActiveSelected && (
               <TbIcon title="Inactivar" disabled={!hasSel} onClick={() => { setConfirmAction('inactivate'); setConfirmOpen(true); }}>
@@ -857,66 +811,57 @@ export default function AcabadosTab() {
 
             <Divider orientation="vertical" flexItem sx={{ mx: 0.5, display: { xs: 'none', sm: 'block' } }} />
 
-            {/* Global actions */}
             <TbIcon title="Refrescar datos" onClick={fetchData}>
               <RefreshIcon fontSize="small" sx={{ transition: 'transform 0.3s', ...(loading && { animation: 'spin 1s linear infinite', '@keyframes spin': { '100%': { transform: 'rotate(360deg)' } } }) }} />
             </TbIcon>
             <TbIcon title="Exportar todo" onClick={() => handleExport(rows)}>
               <SaveAltIcon fontSize="small" />
             </TbIcon>
-            <TbIcon title="Crear acabado" color="primary" onClick={() => setCreateOpen(true)}>
+            <TbIcon title={`Crear ${config.labelSingular.toLowerCase()}`} color="primary" onClick={() => setCreateOpen(true)}>
               <AddCircleOutlineIcon fontSize="small" />
             </TbIcon>
           </Box>
 
-          {/* Divider between rows */}
           <Divider />
 
-          {/* Row 2: Always-visible filters */}
+          {/* Row 2: Filters */}
           <Box sx={{
-            px: 1.5, py: 0.75,
-            display: 'flex', alignItems: 'center', gap: 0.75,
-            overflowX: 'auto',
-            '&::-webkit-scrollbar': { height: 0 },
-            scrollbarWidth: 'none',
+            px: 1.5, py: 0.75, display: 'flex', alignItems: 'center', gap: 0.75,
+            overflowX: 'auto', '&::-webkit-scrollbar': { height: 0 }, scrollbarWidth: 'none',
           }}>
-            {/* Tipo Acabado filters */}
-            <Typography variant="caption" color="text.disabled" sx={{ fontWeight: 600, whiteSpace: 'nowrap', mr: 0.25, display: { xs: 'none', md: 'block' } }}>
-              Tipo:
-            </Typography>
-            {TIPO_OPTIONS.map((t) => (
-              <FilterChip
-                key={t.value}
-                label={t.label}
-                icon={t.icon}
-                active={filterTipo === t.value}
-                activeColor={t.color}
-                activeTextColor={t.textColor}
-                onClick={() => setFilterTipo(filterTipo === t.value ? '' : t.value)}
-              />
+            {/* Extra filter groups from config (e.g., Tipo for acabados) */}
+            {(config.extraFilterGroups || []).map((group) => (
+              <Box key={group.key} sx={{ display: 'contents' }}>
+                <Typography variant="caption" color="text.disabled"
+                  sx={{ fontWeight: 600, whiteSpace: 'nowrap', mr: 0.25, display: { xs: 'none', md: 'block' } }}>
+                  {group.label}:
+                </Typography>
+                {group.options.map((opt) => (
+                  <FilterChip key={opt.value} label={opt.label}
+                    active={extraFilters[group.key] === opt.value}
+                    activeColor={opt.color} activeTextColor={opt.textColor}
+                    onClick={() => setExtraFilters((p) => ({ ...p, [group.key]: p[group.key] === opt.value ? '' : opt.value }))} />
+                ))}
+                <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+              </Box>
             ))}
 
-            <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-
             {/* Status filters */}
-            <Typography variant="caption" color="text.disabled" sx={{ fontWeight: 600, whiteSpace: 'nowrap', mr: 0.25, display: { xs: 'none', md: 'block' } }}>
+            <Typography variant="caption" color="text.disabled"
+              sx={{ fontWeight: 600, whiteSpace: 'nowrap', mr: 0.25, display: { xs: 'none', md: 'block' } }}>
               Estado:
             </Typography>
             {STATUS_OPTIONS.map((s) => (
-              <FilterChip
-                key={s.value}
-                label={s.label}
-                active={filterStatus === s.value}
-                activeColor={s.color}
-                activeTextColor={s.textColor}
-                onClick={() => setFilterStatus(filterStatus === s.value ? '' : s.value)}
-              />
+              <FilterChip key={s.value} label={s.label} active={filterStatus === s.value}
+                activeColor={s.color} activeTextColor={s.textColor}
+                onClick={() => setFilterStatus(filterStatus === s.value ? '' : s.value)} />
             ))}
 
             <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
 
-            {/* Enrichment status filters */}
-            <Typography variant="caption" color="text.disabled" sx={{ fontWeight: 600, whiteSpace: 'nowrap', mr: 0.25, display: { xs: 'none', md: 'block' } }}>
+            {/* Enrichment filters */}
+            <Typography variant="caption" color="text.disabled"
+              sx={{ fontWeight: 600, whiteSpace: 'nowrap', mr: 0.25, display: { xs: 'none', md: 'block' } }}>
               Completitud:
             </Typography>
             <FilterChip label="Pendiente" active={filterEnrichment === 'pendiente'} activeColor={ENRICHMENT_COLORS.pendiente.bg} activeTextColor={ENRICHMENT_COLORS.pendiente.color}
@@ -929,26 +874,12 @@ export default function AcabadosTab() {
               icon={<TaskAltIcon sx={{ fontSize: 14 }} />}
               onClick={() => setFilterEnrichment(filterEnrichment === 'completo' ? '' : 'completo')} />
 
-            {/* Subcategoria filter — only if options exist */}
-            {filterOptions.subcategorias?.length > 0 && (
-              <>
-                <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-                <Typography variant="caption" color="text.disabled" sx={{ fontWeight: 600, whiteSpace: 'nowrap', mr: 0.25, display: { xs: 'none', md: 'block' } }}>
-                  Subcat:
-                </Typography>
-                {filterOptions.subcategorias.slice(0, 6).map((s) => (
-                  <FilterChip key={s} label={s} active={filterSubcat === s}
-                    activeColor="#E3F2FD" activeTextColor="#1565C0"
-                    onClick={() => setFilterSubcat(filterSubcat === s ? '' : s)} />
-                ))}
-              </>
-            )}
-
-            {/* Clear all filters */}
+            {/* Clear all */}
             <Fade in={activeFilters > 0}>
               <Box sx={{ display: 'flex' }}>
                 <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-                <TbIcon title="Limpiar todos los filtros" onClick={() => { setFilterTipo(''); setFilterStatus(''); setFilterEnrichment(''); setFilterSubcat(''); }}>
+                <TbIcon title="Limpiar todos los filtros"
+                  onClick={() => { setFilterStatus(''); setFilterEnrichment(''); setExtraFilters({}); }}>
                   <ClearAllIcon fontSize="small" />
                 </TbIcon>
               </Box>
@@ -957,7 +888,7 @@ export default function AcabadosTab() {
         </Paper>
       </Fade>
 
-      {/* ── Table / Cards ── */}
+      {/* Table / Cards */}
       {isMobile ? (
         <Box>
           {loading ? (
@@ -965,8 +896,7 @@ export default function AcabadosTab() {
               <Fade in timeout={200 + i * 80} key={i}>
                 <Card variant="outlined" sx={{ mb: 1, borderRadius: 2 }}>
                   <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
-                    <Skeleton width="60%" height={24} />
-                    <Skeleton width="80%" height={20} sx={{ mt: 0.5 }} />
+                    <Skeleton width="60%" height={24} /><Skeleton width="80%" height={20} sx={{ mt: 0.5 }} />
                   </CardContent>
                 </Card>
               </Fade>
@@ -975,7 +905,7 @@ export default function AcabadosTab() {
             <Fade in><Typography color="text.secondary" sx={{ py: 4, textAlign: 'center' }}>Sin resultados</Typography></Fade>
           ) : (
             rows.map((item) => (
-              <AcabadoCard key={item.id} item={item}
+              <AttributeCard key={item.id} item={item} config={config}
                 selected={selectionModel.includes(item.id)}
                 onToggle={() => setSelectionModel((prev) => prev.includes(item.id) ? prev.filter((id) => id !== item.id) : [...prev, item.id])}
                 onView={() => handleViewDetail(item)} />
@@ -983,9 +913,7 @@ export default function AcabadosTab() {
           )}
         </Box>
       ) : loading ? (
-        <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
-          <TableSkeleton />
-        </Paper>
+        <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}><TableSkeleton /></Paper>
       ) : (
         <Fade in timeout={TRANSITION_DURATION}>
           <Box>
@@ -1002,21 +930,20 @@ export default function AcabadosTab() {
         </Fade>
       )}
 
-      {/* ── Modals ── */}
-      <CreateModal open={createOpen} onClose={() => setCreateOpen(false)} onSave={handleCreate} saving={saving} />
+      {/* Modals */}
+      <CreateModal open={createOpen} onClose={() => setCreateOpen(false)} onSave={handleCreate}
+        saving={saving} config={config} dimension={dimension} productType={productType} />
       <DetailModal open={detailOpen} onClose={() => { setDetailOpen(false); setDetailItem(null); }}
-        item={detailItem} onSave={handleDetailSave} saving={saving} />
+        item={detailItem} onSave={handleDetailSave} saving={saving} config={config} dimension={dimension} />
       <RenameDialog open={renameOpen} onClose={() => setRenameOpen(false)} onConfirm={handleBulkRename}
-        selectedItems={getSelectedItems()} saving={saving} />
-      <BulkTipoDialog open={bulkTipoOpen} onClose={() => setBulkTipoOpen(false)} onConfirm={handleBulkTipo}
-        count={selectionModel.length} saving={saving} />
+        selectedItems={getSelectedItems()} saving={saving} config={config} />
       <ConfirmDialog open={confirmOpen}
         onClose={() => { setConfirmOpen(false); setConfirmAction(null); }}
         onConfirm={handleBulkConfirm}
-        title={confirmAction === 'delete' ? 'Eliminar Acabados' : confirmAction === 'activate' ? 'Activar Acabados' : 'Inactivar Acabados'}
+        title={confirmAction === 'delete' ? `Eliminar ${config.label}` : confirmAction === 'activate' ? `Activar ${config.label}` : `Inactivar ${config.label}`}
         message={confirmAction === 'delete'
-          ? `¿Eliminar ${selectionModel.length} acabado(s)? Esta accion no se puede deshacer.`
-          : `¿${confirmAction === 'activate' ? 'Activar' : 'Inactivar'} ${selectionModel.length} acabado(s)?`}
+          ? `¿Eliminar ${selectionModel.length} ${config.labelSingular.toLowerCase()}(s)? Esta accion no se puede deshacer.`
+          : `¿${confirmAction === 'activate' ? 'Activar' : 'Inactivar'} ${selectionModel.length} ${config.labelSingular.toLowerCase()}(s)?`}
         confirmLabel={confirmAction === 'delete' ? 'Eliminar' : confirmAction === 'activate' ? 'Activar' : 'Inactivar'}
         color={confirmAction === 'delete' ? 'error' : 'primary'}
         saving={saving} />

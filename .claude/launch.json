@@ -11,7 +11,7 @@
     {
       "name": "Backend (FastAPI)",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--reload", "--port", "8000"],
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8000"],
       "port": 8000,
       "cwd": "backend"
     },

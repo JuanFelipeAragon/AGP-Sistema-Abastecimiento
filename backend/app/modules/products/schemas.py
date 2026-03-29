@@ -16,9 +16,8 @@ class SortOrder(str, Enum):
 
 class BulkActionType(str, Enum):
     rename = "rename"
-    merge = "merge"
     inactivate = "inactivate"
-    delete = "delete"
+    activate = "activate"
     export = "export"
 
 
@@ -37,6 +36,12 @@ class SKUListParams(BaseModel):
     acabado: Optional[str] = None
     sistema: Optional[str] = None
     linea: Optional[str] = None
+    temple: Optional[str] = None
+    aleacion_code: Optional[str] = None
+    longitud: Optional[float] = None
+    longitud_min: Optional[float] = None
+    longitud_max: Optional[float] = None
+    status: Optional[str] = None
     page: int = Field(1, ge=1, description="Page number")
     page_size: int = Field(25, ge=1, le=200, description="Items per page")
     sort_field: Optional[str] = Field(None, description="Field to sort by")
@@ -45,15 +50,21 @@ class SKUListParams(BaseModel):
 
 class SKUResponse(BaseModel):
     """Full SKU data returned by the API."""
+    variantId: int = 0
     ref: str
+    refSiesa: str = ""
     desc: str
     cat: Optional[str] = None
     sub: Optional[str] = None
     sys: Optional[str] = None
     lin: Optional[str] = None
+    productType: str = "Otro"
     acabado: Optional[str] = None
     codAcabado: Optional[str] = None
+    temple: Optional[str] = None
     aleacion: Optional[str] = None
+    aleacionCode: Optional[str] = None
+    longitud: Optional[float] = None
     cost: float = 0
     wt: float = 0
     stk: float = 0
@@ -79,6 +90,32 @@ class SKUListResponse(BaseModel):
     page_size: int
 
 
+# ── SKU Filter Options (Cascading) ──
+
+class SKUFilterOptionsResponse(BaseModel):
+    """Available filter values based on current filters — for cascading/dependent filters."""
+    acabados: list[str] = []
+    temples: list[str] = []
+    aleaciones: list[str] = []
+    longitudes: list[float] = []
+
+
+# ── Product Type Config Schemas ──
+
+class TypeAttributeConfig(BaseModel):
+    """A single attribute config for a product type."""
+    key: str
+    label: str
+    visible: bool = True
+    required: bool = False
+    sortOrder: int = 0
+
+
+class ProductTypeConfigResponse(BaseModel):
+    """Config for all product types — { type: [attributes] }."""
+    config: dict[str, list[TypeAttributeConfig]] = {}
+
+
 # ── Classification Schemas ──
 
 class ChangeLogEntry(BaseModel):
@@ -98,6 +135,7 @@ class ClassificationItem(BaseModel):
     description: Optional[str] = None
     status: ClassificationStatus = ClassificationStatus.active
     skuCount: int = 0
+    priority: int = 0
     isEdited: bool = False
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
@@ -127,6 +165,7 @@ class ClassificationCreateRequest(BaseModel):
     normalizedValue: str = Field(..., min_length=1, description="Normalized display value")
     description: Optional[str] = None
     notes: Optional[str] = None
+    priority: int = Field(0, ge=0, description="Manual sort priority (lower = higher)")
 
 
 class ClassificationUpdateRequest(BaseModel):
@@ -135,39 +174,186 @@ class ClassificationUpdateRequest(BaseModel):
     description: Optional[str] = None
     notes: Optional[str] = None
     status: Optional[ClassificationStatus] = None
+    priority: Optional[int] = Field(None, ge=0, description="Manual sort priority")
 
 
 class BulkActionRequest(BaseModel):
     """Bulk action on multiple classification items."""
     action: BulkActionType
-    ids: list[str] = Field(..., min_length=1, description="List of originalValue ids")
+    ids: list[str] = Field(..., min_length=1, description="List of classification UUIDs")
     newValue: Optional[str] = Field(None, description="New value for rename/merge actions")
 
 
 # ── Acabado Schemas ──
 
+class AcabadoEnrichmentStatus(str, Enum):
+    pendiente = "pendiente"
+    parcial = "parcial"
+    completo = "completo"
+
+
+class AcabadoStatus(str, Enum):
+    active = "active"
+    inactive = "inactive"
+    descontinuado = "descontinuado"
+
+
 class AcabadoItem(BaseModel):
-    """A single acabado (finish) classification."""
-    id: Optional[str] = None
-    originalValue: str
-    normalizedValue: str
-    code: Optional[str] = None
-    description: Optional[str] = None
-    status: ClassificationStatus = ClassificationStatus.active
+    """A single acabado from the dedicated acabados table."""
+    id: str
+    codigo: str
+    nombreSiesa: str
+    nombre: Optional[str] = None
+    familia: Optional[str] = None
+    tipoAcabado: Optional[str] = None
+    colorBase: Optional[str] = None
+    descripcion: Optional[str] = None
+    notas: Optional[str] = None
+    status: AcabadoStatus = AcabadoStatus.active
+    enrichmentStatus: AcabadoEnrichmentStatus = AcabadoEnrichmentStatus.pendiente
+    origen: str = "import"
     skuCount: int = 0
-    isEdited: bool = False
+    subcategorias: list[str] = []
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
     createdBy: Optional[str] = None
     updatedBy: Optional[str] = None
-    notes: Optional[str] = None
     changeLog: list[ChangeLogEntry] = []
+
+
+class AcabadoStats(BaseModel):
+    """Summary statistics for acabados."""
+    total: int = 0
+    anodizado: int = 0
+    pintura: int = 0
+    millFinish: int = 0
+    otro: int = 0
+    sinTipo: int = 0
+    active: int = 0
+    inactive: int = 0
+    pendientes: int = 0
+    parcial: int = 0
+    completo: int = 0
 
 
 class AcabadoListResponse(BaseModel):
     """List of acabados with summary stats."""
     items: list[AcabadoItem]
-    stats: ClassificationStats
+    stats: AcabadoStats
+
+
+class AcabadoCreateRequest(BaseModel):
+    """Create a new acabado manually."""
+    codigo: str = Field(..., min_length=1, description="Unique finish code")
+    nombreSiesa: str = Field(..., min_length=1, description="Siesa name")
+    nombre: Optional[str] = None
+    familia: Optional[str] = None
+    tipoAcabado: Optional[str] = None
+    colorBase: Optional[str] = None
+    descripcion: Optional[str] = None
+    notas: Optional[str] = None
+
+
+class AcabadoUpdateRequest(BaseModel):
+    """Update acabado fields (only App-owned fields)."""
+    nombre: Optional[str] = None
+    familia: Optional[str] = None
+    tipoAcabado: Optional[str] = None
+    colorBase: Optional[str] = None
+    descripcion: Optional[str] = None
+    notas: Optional[str] = None
+    status: Optional[AcabadoStatus] = None
+
+
+class AcabadoBulkActionType(str, Enum):
+    rename = "rename"
+    inactivate = "inactivate"
+    activate = "activate"
+    delete = "delete"
+    set_tipo = "set_tipo"
+    set_familia = "set_familia"
+    export = "export"
+
+
+class AcabadoBulkActionRequest(BaseModel):
+    """Bulk action on multiple acabados."""
+    action: AcabadoBulkActionType
+    ids: list[str] = Field(..., min_length=1, description="List of acabado UUIDs")
+    newValue: Optional[str] = Field(None, description="New value for rename/set actions")
+
+
+# ── Generic Product Attribute Schemas ──
+
+class AttributeItem(BaseModel):
+    """A single product attribute value from the generic product_attributes table."""
+    id: str
+    dimension: str
+    productType: str
+    codigo: str
+    nombreSiesa: str
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    notas: Optional[str] = None
+    metadata: dict = {}
+    status: str = "active"
+    enrichmentStatus: str = "pendiente"
+    skuCount: int = 0
+    origen: str = "import"
+    createdAt: Optional[str] = None
+    updatedAt: Optional[str] = None
+    createdBy: Optional[str] = None
+    updatedBy: Optional[str] = None
+    changeLog: list[ChangeLogEntry] = []
+
+
+class AttributeStats(BaseModel):
+    """Summary statistics for product attributes."""
+    total: int = 0
+    active: int = 0
+    inactive: int = 0
+    pendientes: int = 0
+    parcial: int = 0
+    completo: int = 0
+
+
+class AttributeListResponse(BaseModel):
+    """List of attributes with summary stats."""
+    items: list[AttributeItem]
+    stats: AttributeStats
+
+
+class AttributeCreateRequest(BaseModel):
+    """Create a new product attribute."""
+    productType: str = Field(..., min_length=1, description="Product type (Perfil, Lamina, etc.)")
+    codigo: str = Field(..., min_length=1, description="Unique code within dimension+type")
+    nombreSiesa: str = Field(..., min_length=1, description="Siesa name")
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    notas: Optional[str] = None
+    metadata: dict = {}
+
+
+class AttributeUpdateRequest(BaseModel):
+    """Update an existing product attribute (app-owned fields only)."""
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    notas: Optional[str] = None
+    metadata: Optional[dict] = None
+    status: Optional[str] = None
+
+
+class AttributeBulkActionType(str, Enum):
+    rename = "rename"
+    inactivate = "inactivate"
+    activate = "activate"
+    delete = "delete"
+
+
+class AttributeBulkActionRequest(BaseModel):
+    """Bulk action on multiple product attributes."""
+    action: AttributeBulkActionType
+    ids: list[str] = Field(..., min_length=1, description="List of attribute UUIDs")
+    newValue: Optional[str] = Field(None, description="New value for rename action")
 
 
 # ── Transit Schemas ──
@@ -212,9 +398,10 @@ class DashboardSummaryResponse(BaseModel):
 
 class ProductBaseListParams(BaseModel):
     search: Optional[str] = None
+    categoria: Optional[str] = None
     subcategory: Optional[str] = None
     sistema: Optional[str] = None
-    is_profile: Optional[bool] = None
+    product_type: Optional[str] = None
     status: Optional[str] = None
     page: int = Field(1, ge=1)
     page_size: int = Field(25, ge=1, le=200)
@@ -226,13 +413,28 @@ class ProductBaseItem(BaseModel):
     id: int
     reference: str
     description: Optional[str] = None
+    categoria: Optional[str] = None
     subcategoria: Optional[str] = None
     sistema: Optional[str] = None
     linea: Optional[str] = None
+    productType: str = "Otro"
     pesoUm: float = 0
     isProfile: bool = False
     variantCount: int = 0
     status: str = "Activo"
+    technicalSpecs: dict = {}
+
+
+class ProductUpdateTechnicalSpecs(BaseModel):
+    technicalSpecs: dict
+
+
+class ProductBaseTypeCounts(BaseModel):
+    perfil: int = 0
+    lamina: int = 0
+    escalera: int = 0
+    accesorio: int = 0
+    otro: int = 0
 
 
 class ProductBaseListResponse(BaseModel):
@@ -240,6 +442,7 @@ class ProductBaseListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    typeCounts: ProductBaseTypeCounts = ProductBaseTypeCounts()
 
 
 class ProductBaseDetailResponse(ProductBaseItem):

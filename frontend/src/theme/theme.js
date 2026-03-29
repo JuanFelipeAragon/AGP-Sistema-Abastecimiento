@@ -596,31 +596,65 @@ function buildComponents(mode) {
     MuiDataGrid: {
       styleOverrides: {
         root: {
-          border: `1px solid ${border}`,
+          border: 'none',
           borderRadius: 12,
           fontSize: '0.8125rem',
+          overflow: 'hidden',
+          boxShadow: isDark
+            ? `0 0 0 1px ${alpha('#fff', 0.06)}`
+            : `0 0 0 1px ${PALETTE.slate[200]}`,
           '& .MuiDataGrid-withBorderColor': {
-            borderColor: border,
+            borderColor: isDark ? alpha('#fff', 0.06) : PALETTE.slate[100],
           },
         },
         columnHeaders: {
-          backgroundColor: isDark ? PALETTE.slate[900] : PALETTE.slate[50],
-          borderBottom: `1px solid ${border}`,
+          backgroundColor: PALETTE.slate[900],
+          borderBottom: 'none',
+          // Force bg on every nested element in the header
+          '& .MuiDataGrid-row--borderBottom': {
+            backgroundColor: PALETTE.slate[900],
+          },
         },
         columnHeader: {
+          backgroundColor: PALETTE.slate[900],
           '&:focus, &:focus-within': {
             outline: 'none',
           },
         },
         columnHeaderTitle: {
           fontWeight: 700,
-          fontSize: '0.75rem',
+          fontSize: '0.7rem',
           textTransform: 'uppercase',
-          letterSpacing: '0.03em',
-          color: textSecondary,
+          letterSpacing: '0.06em',
+          color: alpha('#fff', 0.85),
+        },
+        // Checkbox & sort icons in header — white tones on dark bg
+        columnHeaderCheckbox: {
+          '& .MuiCheckbox-root': {
+            color: alpha('#fff', 0.5),
+            '&.Mui-checked, &.MuiCheckbox-indeterminate': {
+              color: PALETTE.blue[300],
+            },
+          },
+        },
+        sortIcon: {
+          color: alpha('#fff', 0.7),
+        },
+        menuIconButton: {
+          color: alpha('#fff', 0.7),
+        },
+        iconSeparator: {
+          color: alpha('#fff', 0.15),
         },
         cell: {
-          borderColor: border,
+          borderColor: isDark ? alpha('#fff', 0.06) : PALETTE.slate[100],
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          textAlign: 'center',
+          whiteSpace: 'normal',
+          wordWrap: 'break-word',
+          lineHeight: 1.4,
           '&:focus, &:focus-within': {
             outline: 'none',
           },
@@ -628,17 +662,46 @@ function buildComponents(mode) {
         row: {
           transition: 'background-color 120ms ease',
           '&:hover': {
-            backgroundColor: isDark ? alpha('#fff', 0.03) : PALETTE.slate[50],
+            backgroundColor: isDark ? alpha('#fff', 0.03) : PALETTE.blue[50],
           },
           '&.Mui-selected': {
-            backgroundColor: isDark ? alpha(primary, 0.1) : alpha(primary, 0.06),
+            backgroundColor: isDark ? alpha(primary, 0.1) : alpha(PALETTE.blue[600], 0.06),
             '&:hover': {
-              backgroundColor: isDark ? alpha(primary, 0.15) : alpha(primary, 0.1),
+              backgroundColor: isDark ? alpha(primary, 0.15) : alpha(PALETTE.blue[600], 0.1),
             },
           },
         },
         footerContainer: {
-          borderTop: `1px solid ${border}`,
+          backgroundColor: PALETTE.slate[900],
+          borderTop: 'none',
+          minHeight: 44,
+          color: alpha('#fff', 0.85),
+          // All text, icons, and controls inside footer → white
+          '& .MuiTablePagination-root': {
+            color: alpha('#fff', 0.85),
+          },
+          '& .MuiTablePagination-selectLabel, & .MuiTablePagination-displayedRows': {
+            color: alpha('#fff', 0.7),
+            fontSize: '0.75rem',
+            fontWeight: 500,
+          },
+          '& .MuiTablePagination-select': {
+            color: '#fff',
+          },
+          '& .MuiSelect-icon': {
+            color: alpha('#fff', 0.6),
+          },
+          '& .MuiIconButton-root': {
+            color: alpha('#fff', 0.7),
+            '&.Mui-disabled': {
+              color: alpha('#fff', 0.25),
+            },
+          },
+          '& .MuiDataGrid-selectedRowCount': {
+            color: alpha('#fff', 0.7),
+            fontWeight: 600,
+            fontSize: '0.75rem',
+          },
         },
         toolbarContainer: {
           borderBottom: `1px solid ${border}`,

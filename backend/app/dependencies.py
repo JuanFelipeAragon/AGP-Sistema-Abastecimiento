@@ -17,8 +17,8 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     # For development, return mock user
     return {
         "id": "mock-user-id",
-        "email": "admin@agp.com",
-        "name": "Admin AGP",
+        "email": "jfaragon@agp.com",
+        "name": "Juan Felipe Aragon",
         "role": "admin",
         "permissions": ["dashboard", "products", "inventory", "sales",
                         "purchases", "logistics", "supply", "users", "settings"],

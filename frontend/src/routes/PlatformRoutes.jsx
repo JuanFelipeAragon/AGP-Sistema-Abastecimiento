@@ -11,6 +11,7 @@ import NotFoundPage from '../pages/NotFoundPage';
 // Lazy-loaded pages
 const ProductosRoot = React.lazy(() => import('../pages/products/ProductosRoot'));
 const TransitoPage = React.lazy(() => import('../pages/transit/TransitoPage'));
+const ConfigRoot = React.lazy(() => import('../pages/admin/ConfigRoot'));
 
 function PageFallback() {
   return (
@@ -77,7 +78,11 @@ export default function PlatformRoutes() {
           <IsolatedModule name="Usuarios"><PlaceholderModule title="Usuarios" subtitle="Gestión de usuarios y permisos" /></IsolatedModule>
         } />
         <Route path="configuracion/*" element={
-          <IsolatedModule name="Configuración"><PlaceholderModule title="Configuración" subtitle="Ajustes generales del sistema" /></IsolatedModule>
+          <IsolatedModule name="Configuración">
+            <Suspense fallback={<PageFallback />}>
+              <ConfigRoot />
+            </Suspense>
+          </IsolatedModule>
         } />
 
         {/* 404 catch-all */}

@@ -1,13 +1,14 @@
 /**
  * VerTodosView — "Ver Todos" dashboard for Productos module.
- * Shows KPI strip + 3 mini DataGrids (Base Products, Variants, Warehouse).
+ * Shows KPI strip + 3 DataGrids (Base Products, Variants, Warehouse).
+ * Designed to fill the full content area on wide/4K screens.
  */
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Box, Paper, Typography, Chip, Button, Grid, Skeleton,
-  Alert,
+  Box, Paper, Typography, Chip, Button, Skeleton, Alert, Fade, useTheme,
 } from '@mui/material';
+import Grid from '@mui/material/Grid';
 import { DataGrid } from '@mui/x-data-grid';
 import Inventory2Icon from '@mui/icons-material/Inventory2';
 import AccountTreeIcon from '@mui/icons-material/AccountTree';
@@ -21,64 +22,178 @@ import productsApi from '../../api/products.api';
 import { formatCOP, formatNumber, formatDate } from '../../utils/formatters';
 
 // ══════════════════════════════════════════════════════════════
-// KPI Card Component
+// KPI Card Component (Bodegas pattern)
 // ══════════════════════════════════════════════════════════════
-function KpiCard({ icon: IconComponent, label, value, isWarning, loading }) {
+function KpiCard({ icon: IconComponent, label, value, isWarning, loading, color, delay = 0 }) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+
+  // Color palette per card
+  const palette = isWarning
+    ? { border: '#E53935', iconBg: isDark ? 'rgba(229,57,53,0.12)' : '#FFEBEE', iconColor: '#E53935' }
+    : {
+        border: color || theme.palette.primary.main,
+        iconBg: color
+          ? (isDark ? `${color}1F` : `${color}14`)
+          : (isDark ? 'rgba(59,130,246,0.12)' : '#EFF6FF'),
+        iconColor: color || theme.palette.primary.main,
+      };
+
   if (loading) {
     return (
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, flex: 1, minWidth: 160 }}>
-        <Skeleton width="60%" height={20} />
-        <Skeleton width="40%" height={32} sx={{ mt: 0.5 }} />
+      <Paper
+        variant="outlined"
+        sx={{
+          flex: 1,
+          minWidth: 110,
+          p: 1.5,
+          borderRadius: 2,
+          borderLeft: `3px solid ${theme.palette.divider}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1.5,
+        }}
+      >
+        <Skeleton variant="circular" width={36} height={36} />
+        <Box sx={{ flex: 1 }}>
+          <Skeleton width="55%" height={14} />
+          <Skeleton width="70%" height={24} sx={{ mt: 0.5 }} />
+        </Box>
       </Paper>
     );
   }
 
   return (
-    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, flex: 1, minWidth: 160 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-        <IconComponent sx={{ fontSize: 20, color: isWarning ? 'warning.main' : 'primary.main' }} />
-        <Typography variant="caption" color="text.secondary" fontWeight={600}>
-          {label}
-        </Typography>
-      </Box>
-      <Typography variant="h5" fontWeight={700} color={isWarning ? 'warning.main' : 'text.primary'}>
-        {value}
-      </Typography>
-    </Paper>
+    <Fade in timeout={400} style={{ transitionDelay: `${delay}ms` }}>
+      <Paper
+        variant="outlined"
+        sx={{
+          flex: 1,
+          minWidth: 110,
+          p: 1.5,
+          borderRadius: 2,
+          borderLeft: `3px solid ${palette.border}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1.5,
+          transition: 'transform 0.18s, box-shadow 0.18s',
+          '&:hover': {
+            transform: 'translateY(-2px)',
+            boxShadow: theme.shadows[3],
+          },
+        }}
+      >
+        <Box
+          sx={{
+            width: 36,
+            height: 36,
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: palette.iconBg,
+            flexShrink: 0,
+          }}
+        >
+          <IconComponent sx={{ fontSize: 18, color: palette.iconColor }} />
+        </Box>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            fontWeight={600}
+            noWrap
+            sx={{ lineHeight: 1.2, display: 'block' }}
+          >
+            {label}
+          </Typography>
+          <Typography
+            variant="h6"
+            fontWeight={700}
+            noWrap
+            color={isWarning ? '#E53935' : 'text.primary'}
+            sx={{ lineHeight: 1.3 }}
+          >
+            {value}
+          </Typography>
+        </Box>
+      </Paper>
+    </Fade>
   );
 }
 
 // ══════════════════════════════════════════════════════════════
 // Mini Grid Card Component
 // ══════════════════════════════════════════════════════════════
-function MiniGridCard({ icon: Icon, title, total, path, rows, columns, loading, navigate }) {
+function MiniGridCard({ icon: Icon, title, total, path, rows, columns, loading, navigate, height }) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+
   return (
-    <Paper variant="outlined" sx={{ borderRadius: 2, overflow: 'hidden' }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', px: 2, py: 1.5, bgcolor: 'grey.50' }}>
+    <Paper
+      variant="outlined"
+      sx={{
+        borderRadius: 2.5,
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        height: height || 'auto',
+      }}
+    >
+      {/* Header */}
+      <Box
+        sx={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          px: 2,
+          py: 1.5,
+          bgcolor: isDark ? 'grey.900' : 'grey.50',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          flexShrink: 0,
+        }}
+      >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <Icon sx={{ fontSize: 20, color: 'primary.main' }} />
           <Typography variant="subtitle2" fontWeight={700}>{title}</Typography>
-          <Chip label={formatNumber(total)} size="small" color="primary" variant="outlined" sx={{ fontWeight: 600 }} />
+          <Chip
+            label={formatNumber(total)}
+            size="small"
+            color="primary"
+            variant="outlined"
+            sx={{ fontWeight: 600, height: 24 }}
+          />
         </Box>
-        <Button size="small" endIcon={<ArrowForwardIcon />} onClick={() => navigate(path)}>
+        <Button
+          size="small"
+          endIcon={<ArrowForwardIcon sx={{ fontSize: '14px !important' }} />}
+          onClick={() => navigate(path)}
+          sx={{ fontWeight: 600, fontSize: '0.78rem' }}
+        >
           Ver todos
         </Button>
       </Box>
-      <DataGrid
-        rows={rows}
-        columns={columns}
-        loading={loading}
-        density="compact"
-        hideFooter
-        disableColumnMenu
-        disableRowSelectionOnClick
-        autoHeight
-        onRowClick={() => navigate(path)}
-        sx={{
-          border: 0,
-          '& .MuiDataGrid-row:hover': { cursor: 'pointer' },
-        }}
-      />
+
+      {/* DataGrid — fills remaining card height */}
+      <Box sx={{ flex: 1, minHeight: 0 }}>
+        <DataGrid
+          rows={rows}
+          columns={columns}
+          loading={loading}
+          density="compact"
+          hideFooter
+          disableColumnMenu
+          disableRowSelectionOnClick
+          onRowClick={() => navigate(path)}
+          sx={{
+            border: 0,
+            height: '100%',
+            '& .MuiDataGrid-row:hover': { cursor: 'pointer' },
+            '& .MuiDataGrid-virtualScroller': { minHeight: 100 },
+          }}
+        />
+      </Box>
     </Paper>
   );
 }
@@ -86,56 +201,52 @@ function MiniGridCard({ icon: Icon, title, total, path, rows, columns, loading, 
 // ══════════════════════════════════════════════════════════════
 // Column Definitions
 // ══════════════════════════════════════════════════════════════
+const statusChipSx = (value) => ({
+  bgcolor: value === 'Activo' ? '#E8F5E9' : '#ECEFF1',
+  color: value === 'Activo' ? '#2E7D32' : '#616161',
+  fontWeight: 600,
+  fontSize: '0.7rem',
+});
+
 const baseProductColumns = [
-  { field: 'reference', headerName: 'Referencia', width: 140 },
-  { field: 'description', headerName: 'Descripcion', flex: 1, minWidth: 160 },
-  { field: 'subcategoria', headerName: 'Subcategoria', width: 140 },
+  { field: 'reference', headerName: 'Referencia', flex: 1.3, minWidth: 110, align: 'center', headerAlign: 'center' },
+  { field: 'description', headerName: 'Descripcion', flex: 2, minWidth: 140, align: 'center', headerAlign: 'center' },
+  { field: 'subcategoria', headerName: 'Subcategoria', flex: 1.3, minWidth: 110, align: 'center', headerAlign: 'center' },
   {
     field: 'variantCount',
     headerName: 'Variantes',
-    width: 90,
+    flex: 0.7,
+    minWidth: 80,
     align: 'center',
     headerAlign: 'center',
   },
   {
     field: 'status',
     headerName: 'Estado',
-    width: 80,
+    flex: 0.7,
+    minWidth: 80,
+    align: 'center',
+    headerAlign: 'center',
     renderCell: (params) => (
-      <Chip
-        label={params.value}
-        size="small"
-        sx={{
-          bgcolor: params.value === 'Activo' ? '#E8F5E9' : '#ECEFF1',
-          color: params.value === 'Activo' ? '#2E7D32' : '#616161',
-          fontWeight: 600,
-          fontSize: '0.7rem',
-        }}
-      />
+      <Chip label={params.value} size="small" sx={statusChipSx(params.value)} />
     ),
   },
 ];
 
 const variantColumns = [
-  { field: 'ref', headerName: 'Ref. SIESA', width: 160 },
-  { field: 'desc', headerName: 'Descripcion', flex: 1, minWidth: 160 },
-  { field: 'acabado', headerName: 'Acabado', width: 110 },
-  { field: 'aleacion', headerName: 'Aleacion', width: 90 },
+  { field: 'ref', headerName: 'Ref. SIESA', flex: 1.3, minWidth: 120, align: 'center', headerAlign: 'center' },
+  { field: 'desc', headerName: 'Descripcion', flex: 2, minWidth: 140, align: 'center', headerAlign: 'center' },
+  { field: 'acabado', headerName: 'Acabado', flex: 1, minWidth: 90, align: 'center', headerAlign: 'center' },
+  { field: 'aleacion', headerName: 'Aleacion', flex: 0.8, minWidth: 80, align: 'center', headerAlign: 'center' },
   {
     field: 'status',
     headerName: 'Estado',
-    width: 80,
+    flex: 0.7,
+    minWidth: 80,
+    align: 'center',
+    headerAlign: 'center',
     renderCell: (params) => (
-      <Chip
-        label={params.value}
-        size="small"
-        sx={{
-          bgcolor: params.value === 'Activo' ? '#E8F5E9' : '#ECEFF1',
-          color: params.value === 'Activo' ? '#2E7D32' : '#616161',
-          fontWeight: 600,
-          fontSize: '0.7rem',
-        }}
-      />
+      <Chip label={params.value} size="small" sx={statusChipSx(params.value)} />
     ),
   },
 ];
@@ -148,18 +259,24 @@ const abcColorMap = {
 };
 
 const warehouseColumns = [
-  { field: 'refSiesa', headerName: 'Ref. SIESA', width: 160 },
-  { field: 'bodega', headerName: 'Bodega', width: 140 },
+  { field: 'refSiesa', headerName: 'Ref. SIESA', flex: 1.3, minWidth: 120, align: 'center', headerAlign: 'center' },
+  { field: 'bodega', headerName: 'Bodega', flex: 1.3, minWidth: 120, align: 'center', headerAlign: 'center' },
   {
     field: 'costoPromedio',
     headerName: 'Costo Prom.',
-    width: 120,
+    flex: 1,
+    minWidth: 100,
+    align: 'center',
+    headerAlign: 'center',
     valueFormatter: (value) => (value != null ? formatCOP(value) : ''),
   },
   {
     field: 'abcRotacionCosto',
     headerName: 'ABC Costo',
-    width: 90,
+    flex: 0.8,
+    minWidth: 80,
+    align: 'center',
+    headerAlign: 'center',
     renderCell: (params) => {
       if (!params.value) return null;
       const colors = abcColorMap[params.value] || { bgcolor: '#ECEFF1', color: '#616161' };
@@ -175,10 +292,16 @@ const warehouseColumns = [
   {
     field: 'fUltimaVenta',
     headerName: 'Ult. Venta',
-    width: 100,
+    flex: 0.9,
+    minWidth: 90,
+    align: 'center',
+    headerAlign: 'center',
     valueFormatter: (value) => formatDate(value),
   },
 ];
+
+// Number of preview rows to fetch for each mini grid
+const PREVIEW_ROWS = 15;
 
 // ══════════════════════════════════════════════════════════════
 // Main Component
@@ -219,7 +342,7 @@ export default function VerTodosView() {
           }),
 
         // Base products
-        productsApi.getBaseProducts({ page: 1, page_size: 10 })
+        productsApi.getBaseProducts({ page: 1, page_size: PREVIEW_ROWS })
           .then((data) => {
             if (!cancelled) {
               setBaseProducts({
@@ -237,7 +360,7 @@ export default function VerTodosView() {
           }),
 
         // Variants (SKUs)
-        productsApi.getSkus({ page: 1, page_size: 10 })
+        productsApi.getSkus({ page: 1, page_size: PREVIEW_ROWS })
           .then((data) => {
             if (!cancelled) {
               setVariants({
@@ -255,7 +378,7 @@ export default function VerTodosView() {
           }),
 
         // Warehouse records
-        productsApi.getWarehouseRecords({ page: 1, page_size: 10 })
+        productsApi.getWarehouseRecords({ page: 1, page_size: PREVIEW_ROWS })
           .then((data) => {
             if (!cancelled) {
               setWarehouse({
@@ -290,18 +413,21 @@ export default function VerTodosView() {
         label: 'Total Productos',
         value: formatNumber(products.total),
         isWarning: false,
+        color: '#1565C0',
       },
       {
         icon: AccountTreeIcon,
         label: 'Perfiles / Otros',
         value: `${formatNumber(products.profiles)} / ${formatNumber(products.accessories)}`,
         isWarning: false,
+        color: '#00897B',
       },
       {
         icon: AccountTreeIcon,
         label: 'Total Variantes',
         value: formatNumber(v.total),
         isWarning: false,
+        color: '#5E35B1',
       },
       {
         icon: WarningAmberIcon,
@@ -314,6 +440,7 @@ export default function VerTodosView() {
         label: 'Valor Inventario',
         value: formatCOP(w.totalInventoryValue),
         isWarning: false,
+        color: '#2E7D32',
       },
       {
         icon: TrendingDownIcon,
@@ -323,6 +450,10 @@ export default function VerTodosView() {
       },
     ];
   }, [summary]);
+
+  // Height for the two top grids — fills available viewport
+  const gridHeight = 'calc((100vh - 340px) / 2)';
+  const gridMinHeight = 320;
 
   return (
     <Box>
@@ -344,16 +475,15 @@ export default function VerTodosView() {
           ? Array.from({ length: 6 }).map((_, i) => (
               <KpiCard key={i} icon={Inventory2Icon} label="" value="" loading />
             ))
-          : kpis.map((kpi) => (
-              <KpiCard key={kpi.label} {...kpi} loading={false} />
+          : kpis.map((kpi, idx) => (
+              <KpiCard key={kpi.label} {...kpi} delay={idx * 60} loading={false} />
             ))
         }
       </Box>
 
-      {/* ── Mini Grids ── */}
-      <Grid container spacing={2}>
-        {/* Productos Base */}
-        <Grid size={{ xs: 12, md: 6, xl: 4 }}>
+      {/* ── Top row: Productos Base + Variantes (side by side) ── */}
+      <Grid container spacing={2} sx={{ mb: 2 }}>
+        <Grid size={{ xs: 12, lg: 6 }}>
           <MiniGridCard
             icon={Inventory2Icon}
             title="Productos Base"
@@ -363,11 +493,10 @@ export default function VerTodosView() {
             columns={baseProductColumns}
             loading={baseProducts.loading}
             navigate={navigate}
+            height={{ xs: 400, md: gridMinHeight, lg: gridHeight }}
           />
         </Grid>
-
-        {/* Variantes */}
-        <Grid size={{ xs: 12, md: 6, xl: 4 }}>
+        <Grid size={{ xs: 12, lg: 6 }}>
           <MiniGridCard
             icon={AccountTreeIcon}
             title="Variantes"
@@ -377,23 +506,23 @@ export default function VerTodosView() {
             columns={variantColumns}
             loading={variants.loading}
             navigate={navigate}
-          />
-        </Grid>
-
-        {/* Bodegas */}
-        <Grid size={{ xs: 12, md: 12, xl: 4 }}>
-          <MiniGridCard
-            icon={WarehouseIcon}
-            title="Productos-Bodegas"
-            total={warehouse.total}
-            path="/platform/productos/bodegas"
-            rows={warehouse.rows}
-            columns={warehouseColumns}
-            loading={warehouse.loading}
-            navigate={navigate}
+            height={{ xs: 400, md: gridMinHeight, lg: gridHeight }}
           />
         </Grid>
       </Grid>
+
+      {/* ── Bottom row: Productos-Bodegas (full width) ── */}
+      <MiniGridCard
+        icon={WarehouseIcon}
+        title="Productos-Bodegas"
+        total={warehouse.total}
+        path="/platform/productos/bodegas"
+        rows={warehouse.rows}
+        columns={warehouseColumns}
+        loading={warehouse.loading}
+        navigate={navigate}
+        height={{ xs: 400, md: gridMinHeight, lg: gridHeight }}
+      />
     </Box>
   );
 }

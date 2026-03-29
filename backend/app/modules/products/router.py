@@ -18,30 +18,84 @@ from app.modules.products.schemas import (
     BulkActionRequest,
     AcabadoItem,
     AcabadoListResponse,
+    AcabadoCreateRequest,
+    AcabadoUpdateRequest,
+    AcabadoBulkActionRequest,
     TransitListResponse,
     DashboardSummaryResponse,
     SortOrder,
     ProductBaseListParams,
     ProductBaseListResponse,
     ProductBaseDetailResponse,
+    ProductUpdateTechnicalSpecs,
     WarehouseRecordListParams,
     WarehouseRecordListResponse,
     ProductsSummaryResponse,
+    ProductTypeConfigResponse,
+    AttributeItem,
+    AttributeListResponse,
+    AttributeCreateRequest,
+    AttributeUpdateRequest,
+    AttributeBulkActionRequest,
 )
 
 router = APIRouter(prefix="/api/products", tags=["products"])
 
 
+# ── Product Type Config ──
+
+@router.get("/type-config", response_model=ProductTypeConfigResponse)
+async def get_type_config(
+    user=Depends(require_permissions(["products"])),
+):
+    """Get attribute configuration for all product types."""
+    return await products_service.get_type_config()
+
+
+@router.get("/subcategoria-type-map")
+async def get_subcategoria_type_map(
+    user=Depends(require_permissions(["products"])),
+):
+    """Get mapping of subcategoria_raw → product_type."""
+    mapping = await products_service.get_subcategoria_type_map()
+    return {"mapping": mapping}
+
+
 # ── SKUs ──
+
+@router.get("/skus/filter-options")
+async def get_sku_filter_options(
+    subcategory: Optional[str] = Query(None),
+    acabado: Optional[str] = Query(None),
+    temple: Optional[str] = Query(None),
+    aleacion_code: Optional[str] = Query(None),
+    longitud: Optional[float] = Query(None),
+    user=Depends(require_permissions(["products"])),
+):
+    """Get available filter values based on current filters — cascading/dependent."""
+    return await products_service.get_sku_filter_options(
+        subcategory=subcategory,
+        acabado=acabado,
+        temple=temple,
+        aleacion_code=aleacion_code,
+        longitud=longitud,
+    )
+
 
 @router.get("/skus", response_model=SKUListResponse)
 async def list_skus(
     search: Optional[str] = Query(None, description="Search by ref or description"),
     category: Optional[str] = Query(None, description="Filter by category"),
     subcategory: Optional[str] = Query(None, description="Filter by subcategory"),
-    acabado: Optional[str] = Query(None, description="Filter by acabado"),
+    acabado: Optional[str] = Query(None, description="Filter by acabado app name"),
     sistema: Optional[str] = Query(None, description="Filter by sistema"),
     linea: Optional[str] = Query(None, description="Filter by linea"),
+    temple: Optional[str] = Query(None, description="Filter by temple"),
+    aleacion_code: Optional[str] = Query(None, description="Filter by aleacion code"),
+    longitud: Optional[float] = Query(None, description="Filter by exact longitud"),
+    longitud_min: Optional[float] = Query(None, description="Filter by min longitud"),
+    longitud_max: Optional[float] = Query(None, description="Filter by max longitud"),
+    status: Optional[str] = Query(None, description="Filter by status"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(25, ge=1, le=200, description="Items per page"),
     sort_field: Optional[str] = Query(None, description="Field to sort by"),
@@ -56,6 +110,12 @@ async def list_skus(
         acabado=acabado,
         sistema=sistema,
         linea=linea,
+        temple=temple,
+        aleacion_code=aleacion_code,
+        longitud=longitud,
+        longitud_min=longitud_min,
+        longitud_max=longitud_max,
+        status=status,
         page=page,
         page_size=page_size,
         sort_field=sort_field,
@@ -104,28 +164,30 @@ async def create_classification(
             status_code=400,
             detail=f"Dimension invalida. Use: {', '.join(valid_dims)}",
         )
-    return await products_service.create_classification(dimension, data)
+    return await products_service.create_classification(dimension, data, user_name=user.get("name", "system"))
 
 
-@router.put("/classifications/{dimension}/{original_value}", response_model=ClassificationItem)
+@router.put("/classifications/{dimension}/{classification_id}", response_model=ClassificationItem)
 async def update_classification(
     dimension: str,
-    original_value: str,
+    classification_id: str,
     data: ClassificationUpdateRequest,
     user=Depends(require_permissions(["products"])),
 ):
-    """Update an existing classification value."""
+    """Update an existing classification value by UUID."""
     valid_dims = ("categorias", "subcategorias", "sistemas", "lineas", "aleaciones")
     if dimension not in valid_dims:
         raise HTTPException(
             status_code=400,
             detail=f"Dimension invalida. Use: {', '.join(valid_dims)}",
         )
-    result = await products_service.update_classification(dimension, original_value, data)
+    result = await products_service.update_classification(
+        dimension, classification_id, data, user_name=user.get("name", "system")
+    )
     if not result:
         raise HTTPException(
             status_code=404,
-            detail=f"Clasificacion '{original_value}' no encontrada en {dimension}",
+            detail=f"Clasificacion '{classification_id}' no encontrada en {dimension}",
         )
     return result
 
@@ -143,7 +205,9 @@ async def bulk_classification_action(
             status_code=400,
             detail=f"Dimension invalida. Use: {', '.join(valid_dims)}",
         )
-    return await products_service.bulk_classification_action(dimension, action_data)
+    return await products_service.bulk_classification_action(
+        dimension, action_data, user_name=user.get("name", "system")
+    )
 
 
 # ── Acabados ──
@@ -151,44 +215,152 @@ async def bulk_classification_action(
 @router.get("/acabados", response_model=AcabadoListResponse)
 async def list_acabados(
     search: Optional[str] = Query(None, description="Search filter"),
+    tipo_acabado: Optional[str] = Query(None, description="Filter by tipo"),
+    familia: Optional[str] = Query(None, description="Filter by familia"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    enrichment: Optional[str] = Query(None, description="Filter by enrichment status"),
+    subcategoria: Optional[str] = Query(None, description="Filter by subcategoria"),
     user=Depends(require_permissions(["products"])),
 ):
-    """Get all acabados with optional search."""
-    return await products_service.get_acabados(search)
+    """Get all acabados with optional filters."""
+    return await products_service.get_acabados(
+        search=search, tipo_acabado=tipo_acabado, familia=familia,
+        status=status, enrichment=enrichment, subcategoria=subcategoria,
+    )
+
+
+@router.get("/acabados/filters")
+async def get_acabado_filters(user=Depends(require_permissions(["products"]))):
+    """Get distinct values for acabado filter dropdowns."""
+    return await products_service.get_acabado_filter_options()
+
+
+@router.get("/acabados/{acabado_id}", response_model=AcabadoItem)
+async def get_acabado(
+    acabado_id: str,
+    user=Depends(require_permissions(["products"])),
+):
+    """Get a single acabado with changelog."""
+    result = await products_service.get_acabado_by_id(acabado_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Acabado no encontrado")
+    return result
 
 
 @router.post("/acabados", response_model=AcabadoItem)
 async def create_acabado(
-    data: ClassificationCreateRequest,
+    data: AcabadoCreateRequest,
     user=Depends(require_permissions(["products"])),
 ):
     """Create a new acabado."""
-    return await products_service.create_acabado(data)
+    return await products_service.create_acabado(data, user_name=user.get("name", "system"))
 
 
-@router.put("/acabados/{original_value}", response_model=AcabadoItem)
+@router.put("/acabados/{acabado_id}", response_model=AcabadoItem)
 async def update_acabado(
-    original_value: str,
-    data: ClassificationUpdateRequest,
+    acabado_id: str,
+    data: AcabadoUpdateRequest,
     user=Depends(require_permissions(["products"])),
 ):
-    """Update an existing acabado."""
-    result = await products_service.update_acabado(original_value, data)
+    """Update an existing acabado (App-owned fields only)."""
+    result = await products_service.update_acabado(
+        acabado_id, data, user_name=user.get("name", "system")
+    )
     if not result:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Acabado '{original_value}' no encontrado",
-        )
+        raise HTTPException(status_code=404, detail="Acabado no encontrado")
     return result
 
 
 @router.post("/acabados/bulk")
 async def bulk_acabado_action(
-    action_data: BulkActionRequest,
+    action_data: AcabadoBulkActionRequest,
     user=Depends(require_permissions(["products"])),
 ):
     """Execute a bulk action on acabados."""
-    return await products_service.bulk_acabado_action(action_data)
+    return await products_service.bulk_acabado_action(
+        action_data, user_name=user.get("name", "system")
+    )
+
+
+# ── Generic Product Attributes ──
+
+@router.get("/attributes/{dimension}", response_model=AttributeListResponse)
+async def list_attributes(
+    dimension: str,
+    product_type: Optional[str] = Query(None, description="Filter by product type"),
+    search: Optional[str] = Query(None, description="Search filter"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    enrichment: Optional[str] = Query(None, description="Filter by enrichment status"),
+    user=Depends(require_permissions(["products"])),
+):
+    """List attribute values for a dimension (temple, aleacion, etc.)."""
+    return await products_service.get_attributes(
+        dimension=dimension, product_type=product_type,
+        search=search, status=status, enrichment=enrichment,
+    )
+
+
+@router.get("/attributes/{dimension}/filters")
+async def get_attribute_filters(
+    dimension: str,
+    product_type: Optional[str] = Query(None),
+    user=Depends(require_permissions(["products"])),
+):
+    """Get distinct filter values for an attribute dimension."""
+    return await products_service.get_attribute_filter_options(dimension, product_type)
+
+
+@router.get("/attributes/{dimension}/{attribute_id}", response_model=AttributeItem)
+async def get_attribute(
+    dimension: str,
+    attribute_id: str,
+    user=Depends(require_permissions(["products"])),
+):
+    """Get a single attribute with changelog."""
+    result = await products_service.get_attribute_by_id(dimension, attribute_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Atributo no encontrado")
+    return result
+
+
+@router.post("/attributes/{dimension}", response_model=AttributeItem)
+async def create_attribute(
+    dimension: str,
+    data: AttributeCreateRequest,
+    user=Depends(require_permissions(["products"])),
+):
+    """Create a new product attribute."""
+    return await products_service.create_attribute(
+        dimension, data, user_name=user.get("name", "system")
+    )
+
+
+@router.put("/attributes/{dimension}/{attribute_id}", response_model=AttributeItem)
+async def update_attribute(
+    dimension: str,
+    attribute_id: str,
+    data: AttributeUpdateRequest,
+    user=Depends(require_permissions(["products"])),
+):
+    """Update an existing product attribute."""
+    result = await products_service.update_attribute(
+        dimension, attribute_id, data, user_name=user.get("name", "system")
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Atributo no encontrado")
+    return result
+
+
+@router.post("/attributes/{dimension}/bulk")
+async def bulk_attribute_action(
+    dimension: str,
+    action_data: AttributeBulkActionRequest,
+    user=Depends(require_permissions(["products"])),
+):
+    """Execute bulk action on product attributes."""
+    return await products_service.bulk_attribute_action(
+        dimension, action_data, user_name=user.get("name", "system")
+    )
 
 
 # ── Dashboard Summary ──
@@ -204,9 +376,10 @@ async def get_dashboard_summary(user=Depends(require_permissions(["products"])))
 @router.get("/base", response_model=ProductBaseListResponse)
 async def list_base_products(
     search: Optional[str] = Query(None),
+    categoria: Optional[str] = Query(None),
     subcategory: Optional[str] = Query(None),
     sistema: Optional[str] = Query(None),
-    is_profile: Optional[bool] = Query(None),
+    product_type: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=200),
@@ -217,9 +390,10 @@ async def list_base_products(
     """List base products with filters, sorting, and pagination."""
     params = ProductBaseListParams(
         search=search,
+        categoria=categoria,
         subcategory=subcategory,
         sistema=sistema,
-        is_profile=is_profile,
+        product_type=product_type,
         status=status,
         page=page,
         page_size=page_size,
@@ -239,6 +413,20 @@ async def get_base_product_detail(
     if not result:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     return result
+
+
+@router.put("/base/{product_id}/technical-specs")
+async def update_technical_specs(
+    product_id: int,
+    body: ProductUpdateTechnicalSpecs,
+    user=Depends(require_permissions(["products"])),
+):
+    """Save technical specs (JSONB) for a base product."""
+    try:
+        updated = await products_service.update_technical_specs(product_id, body.technicalSpecs)
+        return {"technicalSpecs": updated}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 # ── Warehouse Records ──

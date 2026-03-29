@@ -17,6 +17,7 @@ export default function FormCurrencyField({ name, control, label, helperText, ..
           {...props}
           label={label}
           value={formatDisplay(value)}
+          onFocus={(e) => e.target.select()}
           onChange={(e) => {
             const raw = e.target.value.replace(/[^0-9]/g, '');
             onChange(raw ? parseInt(raw, 10) : 0);

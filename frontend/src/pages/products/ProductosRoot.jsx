@@ -15,6 +15,7 @@ const VariantesTab = lazy(() => import('./VariantesTab'));
 const ProductosBodegasTab = lazy(() => import('./ProductosBodegasTab'));
 const ClasificacionesTab = lazy(() => import('./ClasificacionesTab'));
 const AcabadosTab = lazy(() => import('./AcabadosTab'));
+const AtributosTab = lazy(() => import('./AtributosTab'));
 
 function Fallback() {
   return (
@@ -29,7 +30,7 @@ export default function ProductosRoot() {
     <Box>
       <PageHeader
         title="Productos"
-        subtitle="Gestiona productos, variantes, clasificaciones y datos por bodega"
+        subtitle="Gestiona productos, variantes, atributos, clasificaciones y datos por bodega"
       />
       <ProductosNav />
       <Box sx={{ mt: 2 }}>
@@ -41,6 +42,7 @@ export default function ProductosRoot() {
             <Route path="bodegas" element={<ProductosBodegasTab />} />
             <Route path="clasificaciones" element={<ClasificacionesTab />} />
             <Route path="acabados" element={<AcabadosTab />} />
+            <Route path="atributos" element={<AtributosTab />} />
           </Routes>
         </Suspense>
       </Box>

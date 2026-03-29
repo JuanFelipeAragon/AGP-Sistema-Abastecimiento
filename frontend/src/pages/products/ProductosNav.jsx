@@ -9,6 +9,7 @@ import AccountTreeIcon from '@mui/icons-material/AccountTree';
 import WarehouseIcon from '@mui/icons-material/Warehouse';
 import CategoryIcon from '@mui/icons-material/Category';
 import PaletteIcon from '@mui/icons-material/Palette';
+import TuneIcon from '@mui/icons-material/Tune';
 
 const NAV_ITEMS = [
   { label: 'Ver Todos', path: '', Icon: DashboardIcon },
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
   { label: 'Productos-Bodegas', path: 'bodegas', Icon: WarehouseIcon },
   { label: 'Clasificaciones', path: 'clasificaciones', Icon: CategoryIcon },
   { label: 'Acabados', path: 'acabados', Icon: PaletteIcon },
+  { label: 'Atributos', path: 'atributos', Icon: TuneIcon },
 ];
 
 const BASE = '/platform/productos';

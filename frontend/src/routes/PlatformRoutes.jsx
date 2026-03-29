@@ -12,6 +12,7 @@ import NotFoundPage from '../pages/NotFoundPage';
 const ProductosRoot = React.lazy(() => import('../pages/products/ProductosRoot'));
 const TransitoPage = React.lazy(() => import('../pages/transit/TransitoPage'));
 const ConfigRoot = React.lazy(() => import('../pages/admin/ConfigRoot'));
+const VentasRoot = React.lazy(() => import('../pages/ventas/VentasRoot'));
 
 function PageFallback() {
   return (
@@ -66,7 +67,11 @@ export default function PlatformRoutes() {
           <IsolatedModule name="Inventario"><PlaceholderModule title="Inventario" subtitle="Control de stock y movimientos de bodega" /></IsolatedModule>
         } />
         <Route path="ventas/*" element={
-          <IsolatedModule name="Ventas"><PlaceholderModule title="Ventas" subtitle="Registro y análisis de ventas" /></IsolatedModule>
+          <IsolatedModule name="Ventas">
+            <Suspense fallback={<PageFallback />}>
+              <VentasRoot />
+            </Suspense>
+          </IsolatedModule>
         } />
         <Route path="compras/*" element={
           <IsolatedModule name="Compras"><PlaceholderModule title="Compras" subtitle="Gestión de órdenes de compra e importaciones" /></IsolatedModule>

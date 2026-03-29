@@ -28,6 +28,7 @@ import TuneIcon from '@mui/icons-material/Tune';
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
 import PublicIcon from '@mui/icons-material/Public';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
+import BadgeIcon from '@mui/icons-material/Badge';
 
 export const SIDEBAR_WIDTH_EXPANDED = 260;
 export const SIDEBAR_WIDTH_COLLAPSED = 72;
@@ -84,7 +85,19 @@ const MODULE_GROUPS = [
         ],
       },
       { key: 'inventory', label: 'Inventario', icon: <Inventory2Icon fontSize="small" />, path: '/platform/inventario' },
-      { key: 'sales', label: 'Ventas', icon: <ShoppingCartIcon fontSize="small" />, path: '/platform/ventas' },
+      {
+        key: 'sales',
+        label: 'Ventas',
+        icon: <ShoppingCartIcon fontSize="small" />,
+        path: '/platform/ventas',
+        children: [
+          { key: 'sales-all', label: 'Ver Todos', icon: <ViewListIcon fontSize="small" />, path: '/platform/ventas' },
+          { key: 'sales-facturacion', label: 'Facturación', icon: <ReceiptIcon fontSize="small" />, path: '/platform/ventas/facturacion' },
+          { key: 'sales-clientes', label: 'Clientes', icon: <PeopleIcon fontSize="small" />, path: '/platform/ventas/clientes' },
+          { key: 'sales-vendedores', label: 'Vendedores', icon: <BadgeIcon fontSize="small" />, path: '/platform/ventas/vendedores' },
+          { key: 'sales-geografia', label: 'Geografía', icon: <PublicIcon fontSize="small" />, path: '/platform/ventas/geografia' },
+        ],
+      },
       { key: 'purchases', label: 'Compras', icon: <ReceiptIcon fontSize="small" />, path: '/platform/compras' },
     ],
   },

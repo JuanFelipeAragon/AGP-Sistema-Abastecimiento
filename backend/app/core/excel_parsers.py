@@ -138,9 +138,10 @@ def parse_maestro_full(df: pd.DataFrame) -> dict:
 
     Returns:
         {
-            "products": [...]            # 1 per unique reference
-            "warehouse_records": [...]   # 1 per Excel row (ref + bodega + item_id)
-            "summary": { total_rows, unique_refs, unique_bodegas }
+            "products": [...]            # 1 per unique base reference
+            "variants": [...]            # 1 per unique (reference, acabado_code)
+            "warehouse_records": [...]   # 1 per Excel row (ref + acabado + bodega)
+            "summary": { total_rows, unique_refs, unique_variants, unique_bodegas }
         }
     """
     required = ["Referencia", "CATEGORIA"]
@@ -152,53 +153,91 @@ def parse_maestro_full(df: pd.DataFrame) -> dict:
     df["Referencia"] = df["Referencia"].astype(str).str.strip()
     df = df[df["Referencia"].notna() & (df["Referencia"] != "") & (df["Referencia"] != "nan")]
 
+    # Normalize acabado_code column for grouping
+    if "Ext. 2 detalle" in df.columns:
+        df["_acabado_code"] = df["Ext. 2 detalle"].astype(str).str.strip().replace("nan", "")
+    else:
+        df["_acabado_code"] = ""
+
     products = []
+    products_seen = set()
+    variants = []
     warehouse_records = []
 
-    for ref, group in df.groupby("Referencia"):
+    # ── Build products (1 per reference) and variants (1 per ref+acabado) ──
+    for (ref, acabado_code), group in df.groupby(["Referencia", "_acabado_code"]):
         first_row = group.iloc[0]
-        ext1_info = _parse_ext1(first_row.get("Ext. 1 detalle", ""))
+        ref_str = str(ref)
+        acabado_str = str(acabado_code).strip() if acabado_code else ""
 
-        # ── Product-level record (1 per reference) ──
-        products.append({
-            "reference": str(ref),
-            "description": _str(first_row.get("Desc. item", first_row.get("Item", ref))),
-            "categoria_raw": _str(first_row.get("CATEGORIA", "")),
-            "subcategoria_raw": _str(first_row.get("SUBCATEGORIA", "")),
-            "sistema_raw": _str(first_row.get("SISTEMAS", "")),
-            "linea_raw": _str(first_row.get("LINEA", "")),
-            "peso_um": _num(first_row.get("Peso U.M. Inv.", 0)),
-            "status": "active" if _str(first_row.get("Estado", "Activo")).lower() == "activo" else "inactive",
-            # Variant-level fields extracted from first row
-            "item_id": int(_num(first_row.get("Item", 0))),
-            "acabado_code": _str(first_row.get("Ext. 2 detalle", "")),
+        # ── Product-level record (1 per reference, deduplicated) ──
+        if ref_str not in products_seen:
+            products_seen.add(ref_str)
+            products.append({
+                "reference": ref_str,
+                "description": _str(first_row.get("Desc. item", first_row.get("Item", ref))),
+                "categoria_raw": _str(first_row.get("CATEGORIA", "")),
+                "subcategoria_raw": _str(first_row.get("SUBCATEGORIA", "")),
+                "sistema_raw": _str(first_row.get("SISTEMAS", "")),
+                "linea_raw": _str(first_row.get("LINEA", "")),
+                "peso_um": _num(first_row.get("Peso U.M. Inv.", 0)),
+                "status": "active" if _str(first_row.get("Estado", "Activo")).lower() == "activo" else "inactive",
+            })
+
+        # ── Variant-level record (1 per reference + acabado_code) ──
+        ext1_info = _parse_ext1(first_row.get("Ext. 1 detalle", ""))
+        acabado_desc = _str(first_row.get("Desc. ext. 2 detalle",
+                            first_row.get("Desc. ext. 2", "")))
+
+        # Collect item_id from any row in the group (first valid)
+        item_id = 0
+        for _, r in group.iterrows():
+            iid = _num(r.get("Item", 0))
+            if iid > 0:
+                item_id = int(iid)
+                break
+
+        variants.append({
+            "reference": ref_str,
+            "acabado_code": acabado_str or None,
+            "acabado_name": acabado_desc or None,
+            "item_id": item_id,
             "temple": ext1_info["temple"],
             "aleacion": ext1_info["aleacion"],
             "aleacion_code": ext1_info["aleacion_code"],
+            "subcategoria_raw": _str(first_row.get("SUBCATEGORIA", "")),
+            "categoria_raw": _str(first_row.get("CATEGORIA", "")),
+            "sistema_raw": _str(first_row.get("SISTEMAS", "")),
+            "linea_raw": _str(first_row.get("LINEA", "")),
             "posicion_arancelaria": _str(first_row.get("Desc. posición arancelaria",
                                         first_row.get("Desc. posici\xf3n arancelaria", ""))),
-            # Flags
-            "flag_compra": _flag(first_row.get("Compra", "No")),
-            "flag_venta": _flag(first_row.get("Venta", "No")),
-            "flag_manufactura": _flag(first_row.get("Manufactura", "No")),
-            "flag_lote": _flag(first_row.get("Maneja lote", "No")),
-            "flag_paquete": _flag(first_row.get("Maneja paquete", "No")),
-            # Dates
+            # Flags — OR across all rows in this variant group
+            "flag_compra": any(_flag(r.get("Compra", "No")) for _, r in group.iterrows()),
+            "flag_venta": any(_flag(r.get("Venta", "No")) for _, r in group.iterrows()),
+            "flag_manufactura": any(_flag(r.get("Manufactura", "No")) for _, r in group.iterrows()),
+            "flag_lote": any(_flag(r.get("Maneja lote", "No")) for _, r in group.iterrows()),
+            "flag_paquete": any(_flag(r.get("Maneja paquete", "No")) for _, r in group.iterrows()),
+            # Dates from first row
             "fecha_creacion_siesa": _date_iso(first_row.get("Fecha creación",
                                               first_row.get("Fecha creaci\xf3n", None))),
             "fecha_actualizacion_siesa": _date_iso(first_row.get("Fecha actualización",
                                                    first_row.get("Fecha actualizaci\xf3n", None))),
             "fecha_inactivacion": _date_iso(first_row.get("Fecha inactivación",
                                             first_row.get("Fecha inactivaci\xf3n", None))),
+            # Status: active if ANY row in group is active
+            "status": "active" if any(
+                _str(r.get("Estado", "Activo")).lower() == "activo" for _, r in group.iterrows()
+            ) else "inactive",
         })
 
-        # ── Warehouse-level records (1 per Excel row) ──
+        # ── Warehouse-level records (1 per Excel row, with acabado_code) ──
         for _, row in group.iterrows():
             bodega = _str(row.get("Desc. bodega", ""))
             if not bodega:
                 continue
             warehouse_records.append({
-                "reference": str(ref),
+                "reference": ref_str,
+                "acabado_code": acabado_str or None,
                 "item_id": int(_num(row.get("Item", 0))),
                 "bodega_name": bodega,
                 "costo_promedio": _num(row.get("Costo prom. uni.", 0)),
@@ -224,10 +263,12 @@ def parse_maestro_full(df: pd.DataFrame) -> dict:
 
     return {
         "products": products,
+        "variants": variants,
         "warehouse_records": warehouse_records,
         "summary": {
             "total_rows": len(df),
             "unique_refs": len(products),
+            "unique_variants": len(variants),
             "unique_bodegas": len(set(r["bodega_name"] for r in warehouse_records)),
         },
     }

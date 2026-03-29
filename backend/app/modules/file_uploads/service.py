@@ -239,7 +239,11 @@ class FileUploadService:
 
             # 3. Parse records
             if file_type == "maestro":
+                full_data = parse_maestro_full(df)
+                # Use products list for diff (backward compat with simple format)
                 records = parse_maestro(df)
+                # Store full data alongside for sync
+                _maestro_full_data = full_data
             elif file_type == "ventas":
                 records = parse_ventas(df)
             elif file_type in ("transito_flex", "transito_siesa"):
@@ -278,10 +282,19 @@ class FileUploadService:
                 "deleted_rows_total": len(diff["deleted_rows"]),
             }
 
-            # 7. Save new snapshot
+            # 7. Save new snapshot (include full data for maestro sync)
+            snapshot_payload = records
+            if file_type == "maestro" and _maestro_full_data:
+                snapshot_payload = {
+                    "_version": 2,
+                    "records": records,
+                    "variants": _maestro_full_data.get("variants", []),
+                    "warehouse_records": _maestro_full_data.get("warehouse_records", []),
+                    "summary": _maestro_full_data.get("summary", {}),
+                }
             sb.table("file_upload_snapshots").insert({
                 "file_type": storage_type,
-                "snapshot_data": records,
+                "snapshot_data": snapshot_payload,
                 "upload_id": upload_id,
             }).execute()
 
@@ -356,63 +369,71 @@ class FileUploadService:
             result.message = "No se encontró snapshot de datos para este upload"
             return result
 
-        # The snapshot has the simple parse_maestro output. We need the full parse.
-        # Re-parse would require the file. Instead, use the snapshot for product-level
-        # and re-read from the stored upload record.
-        # BETTER: Store full parse data. For now, use snapshot + enrich from DB.
-
-        snapshot_records = snap.data["snapshot_data"]
-        if not snapshot_records:
+        # Parse snapshot — support both v1 (simple list) and v2 (full data with variants)
+        raw_snapshot = snap.data["snapshot_data"]
+        if not raw_snapshot:
             result.status = "error"
             result.message = "Snapshot vacío"
             return result
 
+        # Detect snapshot version
+        if isinstance(raw_snapshot, dict) and raw_snapshot.get("_version") == 2:
+            snapshot_records = raw_snapshot.get("records", [])
+            snapshot_variants = raw_snapshot.get("variants", [])
+            snapshot_warehouse = raw_snapshot.get("warehouse_records", [])
+        else:
+            # Legacy v1 snapshot — only product-level records, no variant detail
+            snapshot_records = raw_snapshot if isinstance(raw_snapshot, list) else []
+            snapshot_variants = []
+            snapshot_warehouse = []
+
         try:
             # ── Step 1: Build lookup maps ──
-            # Existing products by reference
             existing_products = sb.table("products").select("id,reference,product_type,technical_specs").execute().data or []
             product_map = {p["reference"]: p for p in existing_products}
 
-            # Existing variants by reference_siesa
-            existing_variants = sb.table("product_variants").select("id,reference_siesa,product_id,acabado_id").execute().data or []
-            variant_map = {v["reference_siesa"]: v for v in existing_variants}
+            # Existing variants by (reference_siesa, acabado_code) composite key
+            existing_variants_raw = []
+            offset = 0
+            while True:
+                batch = sb.table("product_variants").select("id,reference_siesa,acabado_code,product_id,acabado_id").range(offset, offset + 999).execute().data or []
+                existing_variants_raw.extend(batch)
+                if len(batch) < 1000:
+                    break
+                offset += 1000
+            variant_map = {}  # (ref, acabado_code) -> variant dict
+            variant_map_by_ref = {}  # ref -> variant dict (legacy fallback)
+            for v in existing_variants_raw:
+                key = (v["reference_siesa"], v.get("acabado_code") or None)
+                variant_map[key] = v
+                variant_map_by_ref.setdefault(v["reference_siesa"], v)
 
-            # Existing warehouses by name
             existing_warehouses = sb.table("warehouses").select("id,name").execute().data or []
             warehouse_map = {w["name"]: w["id"] for w in existing_warehouses}
 
-            # Existing classifications
             existing_cls = sb.table("classifications").select("id,dimension,original_value").execute().data or []
             cls_set = {(c["dimension"], c["original_value"]) for c in existing_cls}
 
-            # Existing acabados by code
             existing_acabados = sb.table("acabados").select("id,codigo").execute().data or []
             acabado_code_map = {a["codigo"]: a["id"] for a in existing_acabados}
 
-            # Existing attributes (temple, aleacion)
-            existing_attrs = sb.table("product_attributes").select("id,dimension,codigo").execute().data or []
-            attr_set = {(a["dimension"], a["codigo"]) for a in existing_attrs}
-
-            # Track which refs are in the file
             refs_in_file = set()
 
-            # ── Step 2: Sync products & variants ──
+            # ── Step 2: Sync products ──
             for rec in snapshot_records:
                 ref = rec.get("reference", "").strip()
                 if not ref:
                     continue
                 refs_in_file.add(ref)
 
-                # -- Product upsert --
                 cat_raw = rec.get("category", "")
                 subcat_raw = rec.get("subcategory", "")
                 sys_raw = rec.get("system", "")
                 status_val = "active" if rec.get("status", "Activo").lower() in ("activo", "active") else "inactive"
 
                 if ref in product_map:
-                    # UPDATE — only Siesa-owned fields
                     pid = product_map[ref]["id"]
-                    updates = {
+                    sb.table("products").update({
                         "description": rec.get("description", ref),
                         "categoria_raw": cat_raw,
                         "subcategoria_raw": subcat_raw,
@@ -420,11 +441,9 @@ class FileUploadService:
                         "peso_um": rec.get("weight_per_meter", 0),
                         "status": status_val,
                         "updated_at": "now()",
-                    }
-                    sb.table("products").update(updates).eq("id", pid).execute()
+                    }).eq("id", pid).execute()
                     result.productsUpdated += 1
                 else:
-                    # INSERT new product
                     new_prod = sb.table("products").insert({
                         "reference": ref,
                         "description": rec.get("description", ref),
@@ -439,26 +458,7 @@ class FileUploadService:
                     product_map[ref] = {"id": pid, "reference": ref}
                     result.productsCreated += 1
 
-                # -- Variant upsert --
-                if ref in variant_map:
-                    vid = variant_map[ref]["id"]
-                    v_updates = {
-                        "status": status_val,
-                        "updated_at": "now()",
-                    }
-                    sb.table("product_variants").update(v_updates).eq("id", vid).execute()
-                    result.variantsUpdated += 1
-                else:
-                    new_var = sb.table("product_variants").insert({
-                        "product_id": pid,
-                        "reference_siesa": ref,
-                        "status": status_val,
-                    }).execute()
-                    vid = new_var.data[0]["id"]
-                    variant_map[ref] = {"id": vid, "reference_siesa": ref, "product_id": pid}
-                    result.variantsCreated += 1
-
-                # -- Auto-discover classifications --
+                # Auto-discover classifications
                 for dim, raw_val in [("categoria", cat_raw), ("subcategoria", subcat_raw), ("sistema", sys_raw)]:
                     if raw_val and (dim, raw_val) not in cls_set:
                         sb.table("classifications").insert({
@@ -471,26 +471,137 @@ class FileUploadService:
                         cls_set.add((dim, raw_val))
                         result.classificationsDiscovered += 1
 
-            # ── Step 3: Sync warehouse records ──
-            # We need to rebuild warehouse records from the snapshot.
-            # The simple snapshot doesn't have per-warehouse detail,
-            # so we use unit_cost and stock_quantity as aggregate approximation.
-            # Full warehouse sync requires parse_maestro_full output stored as snapshot.
-            # For now, log that warehouse sync needs full re-parse.
+            # ── Step 3: Sync variants (per acabado) ──
+            if snapshot_variants:
+                for vrec in snapshot_variants:
+                    ref = vrec.get("reference", "").strip()
+                    acabado_code = vrec.get("acabado_code") or None
+                    if not ref:
+                        continue
 
-            # ── Step 4: Detect inactivations ──
-            for ref, prod in product_map.items():
+                    pid = (product_map.get(ref) or {}).get("id")
+                    if not pid:
+                        continue
+
+                    status_val = vrec.get("status", "active")
+                    acabado_id = acabado_code_map.get(acabado_code) if acabado_code else None
+
+                    variant_key = (ref, acabado_code)
+                    existing = variant_map.get(variant_key)
+
+                    variant_fields = {
+                        "acabado_code": acabado_code,
+                        "acabado_id": acabado_id,
+                        "acabado_name": vrec.get("acabado_name"),
+                        "temple": vrec.get("temple") or None,
+                        "aleacion": vrec.get("aleacion") or None,
+                        "aleacion_code": vrec.get("aleacion_code") or None,
+                        "subcategoria_raw": vrec.get("subcategoria_raw"),
+                        "categoria_raw": vrec.get("categoria_raw"),
+                        "sistema_raw": vrec.get("sistema_raw"),
+                        "linea_raw": vrec.get("linea_raw"),
+                        "item_id": vrec.get("item_id"),
+                        "flag_compra": vrec.get("flag_compra", False),
+                        "flag_venta": vrec.get("flag_venta", False),
+                        "status": status_val,
+                        "updated_at": "now()",
+                    }
+
+                    if existing:
+                        sb.table("product_variants").update(variant_fields).eq("id", existing["id"]).execute()
+                        result.variantsUpdated += 1
+                    else:
+                        variant_fields["product_id"] = pid
+                        variant_fields["reference_siesa"] = ref
+                        new_var = sb.table("product_variants").insert(variant_fields).execute()
+                        vid = new_var.data[0]["id"]
+                        variant_map[variant_key] = {"id": vid, "reference_siesa": ref, "acabado_code": acabado_code, "product_id": pid}
+                        result.variantsCreated += 1
+            else:
+                # Legacy v1 fallback: create one variant per product (no acabado info)
+                for rec in snapshot_records:
+                    ref = rec.get("reference", "").strip()
+                    if not ref:
+                        continue
+                    pid = (product_map.get(ref) or {}).get("id")
+                    if not pid:
+                        continue
+                    status_val = "active" if rec.get("status", "Activo").lower() in ("activo", "active") else "inactive"
+                    variant_key = (ref, None)
+                    existing = variant_map.get(variant_key) or variant_map_by_ref.get(ref)
+                    if existing:
+                        sb.table("product_variants").update({"status": status_val, "updated_at": "now()"}).eq("id", existing["id"]).execute()
+                        result.variantsUpdated += 1
+                    else:
+                        new_var = sb.table("product_variants").insert({"product_id": pid, "reference_siesa": ref, "status": status_val}).execute()
+                        result.variantsCreated += 1
+
+            # ── Step 4: Sync warehouse records ──
+            if snapshot_warehouse:
+                # Refresh variant_map after inserts
+                variant_id_lookup = {}
+                offset = 0
+                while True:
+                    batch = sb.table("product_variants").select("id,reference_siesa,acabado_code").range(offset, offset + 999).execute().data or []
+                    for v in batch:
+                        variant_id_lookup[(v["reference_siesa"], v.get("acabado_code") or None)] = v["id"]
+                    if len(batch) < 1000:
+                        break
+                    offset += 1000
+
+                pw_count = 0
+                pw_batch = []
+                for wrec in snapshot_warehouse:
+                    ref = wrec.get("reference", "").strip()
+                    acabado_code = wrec.get("acabado_code") or None
+                    bodega = wrec.get("bodega_name", "")
+                    if not ref or not bodega:
+                        continue
+                    wh_id = warehouse_map.get(bodega)
+                    vid = variant_id_lookup.get((ref, acabado_code))
+                    if not wh_id or not vid:
+                        continue
+                    pw_batch.append({
+                        "variant_id": vid,
+                        "warehouse_id": wh_id,
+                        "costo_promedio": wrec.get("costo_promedio", 0),
+                        "precio_unitario": wrec.get("precio_unitario", 0),
+                        "costo_promedio_total": wrec.get("costo_promedio_total", 0),
+                        "margen_pct": wrec.get("margen_pct", 0),
+                        "unidad_precio": wrec.get("unidad_precio"),
+                        "abc_rotacion_veces": wrec.get("abc_rotacion_veces"),
+                        "abc_rotacion_costo": wrec.get("abc_rotacion_costo"),
+                        "abc_rotacion_veces_bod": wrec.get("abc_rotacion_veces_bod"),
+                        "abc_rotacion_costo_bod": wrec.get("abc_rotacion_costo_bod"),
+                        "fecha_ultima_venta": wrec.get("fecha_ultima_venta"),
+                        "fecha_ultima_entrada": wrec.get("fecha_ultima_entrada"),
+                        "fecha_ultima_salida": wrec.get("fecha_ultima_salida"),
+                        "fecha_ultima_compra": wrec.get("fecha_ultima_compra"),
+                        "fecha_ultimo_conteo": wrec.get("fecha_ultimo_conteo"),
+                    })
+
+                # Batch upsert warehouse records
+                for i in range(0, len(pw_batch), 500):
+                    chunk = pw_batch[i:i + 500]
+                    try:
+                        sb.table("product_warehouse").upsert(chunk, on_conflict="variant_id,warehouse_id").execute()
+                        pw_count += len(chunk)
+                    except Exception as e:
+                        logger.warning(f"Warehouse upsert error: {e}")
+                result.warehouseRecordsUpserted = pw_count
+
+            # ── Step 5: Detect inactivations ──
+            for ref in product_map:
                 if ref not in refs_in_file:
                     result.refsNotInFile += 1
 
-            # Count refs that changed to inactive
             for rec in snapshot_records:
                 ref = rec.get("reference", "").strip()
                 status_val = "active" if rec.get("status", "Activo").lower() in ("activo", "active") else "inactive"
-                if status_val == "inactive" and ref in variant_map:
+                if status_val == "inactive" and variant_map_by_ref.get(ref):
                     result.refsInactivated += 1
 
-            # ── Step 5: Update upload status ──
+            # ── Step 6: Update upload status ──
             sb.table("file_uploads").update({
                 "status": "success",
                 "changes_summary": {
@@ -512,6 +623,8 @@ class FileUploadService:
                 f"Sync completado: {result.productsCreated} productos nuevos, "
                 f"{result.productsUpdated} actualizados, "
                 f"{result.variantsCreated} variantes nuevas, "
+                f"{result.variantsUpdated} variantes actualizadas, "
+                f"{result.warehouseRecordsUpserted} registros bodega, "
                 f"{result.classificationsDiscovered} clasificaciones descubiertas"
             )
 
